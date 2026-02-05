@@ -1,0 +1,82 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  qa-test:
+    name: QA Testing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate HTML Structure
+        run: |
+          echo "Checking HTML structure..."
+          if grep -q "<!DOCTYPE html>" index.html && grep -q "</html>" index.html; then
+            echo "HTML structure is valid"
+          else
+            echo "HTML structure is invalid"
+            exit 1
+          fi
+
+      - name: Count bracket balance
+        run: |
+          echo "Checking bracket balance..."
+          OPEN_BRACE=$(grep -o '{' index.html | wc -l)
+          CLOSE_BRACE=$(grep -o '}' index.html | wc -l)
+          if [ "$OPEN_BRACE" -ne "$CLOSE_BRACE" ]; then
+            echo "Brace mismatch!"
+            exit 1
+          fi
+          echo "All brackets balanced"
+
+      - name: Check CDN dependencies
+        run: |
+          grep -q "unpkg.com/react@18" index.html && echo "React found"
+          grep -q "unpkg.com/react-dom@18" index.html && echo "ReactDOM found"
+
+      - name: QA Summary
+        run: echo "ALL QA TESTS PASSED!"
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: qa-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
