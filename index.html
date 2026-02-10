@@ -1896,19 +1896,48 @@
 
     // Dashboard Component
     const Dashboard = ({ onNavigate, refreshKey }) => {
-      const [stats, setStats] = React.useState({ totalProjects: 0, totalRoles: 0, totalPipelineValue: 0 });
+      const [stats, setStats] = React.useState({ totalProjects: 0, totalRoles: 0, totalPipelineValue: 0, totalCost: 0, totalProfit: 0, avgMargin: 0, approvedCount: 0, pendingCount: 0, draftCount: 0 });
       const [recentProjects, setRecentProjects] = React.useState([]);
+      const [deptBreakdown, setDeptBreakdown] = React.useState([]);
 
       React.useEffect(() => {
         const projects = db.getProjects();
-        let totalPipelineValue = 0;
-        const projectsWithTotals = projects.slice(0, 5).map(p => {
+        let totalPipelineValue = 0, totalCost = 0, totalProfit = 0, marginSum = 0;
+        let approvedCount = 0, pendingCount = 0, draftCount = 0;
+        const deptCosts = {};
+
+        const allProjectTotals = projects.map(p => {
           const totals = db.calculateProjectTotals(p.id);
           totalPipelineValue += totals.sellingPrice;
+          totalCost += totals.totalCost;
+          totalProfit += totals.sellingPrice - totals.totalCost;
+          marginSum += totals.actualMargin;
+          if (p.status === 'approved') approvedCount++;
+          else if (p.status === 'pending_approval') pendingCount++;
+          else draftCount++;
+
+          // Department breakdown
+          const phases = db.getPhases(p.id);
+          phases.forEach(phase => {
+            const resources = db.getResourceCosts(phase.id);
+            resources.forEach(r => {
+              const role = db.getRoles().find(rl => rl.id === r.role_id);
+              const dept = role?.department || 'Other';
+              deptCosts[dept] = (deptCosts[dept] || 0) + r.total;
+            });
+          });
+
           return { ...p, ...totals };
         });
-        setStats({ totalProjects: projects.length, totalRoles: db.getRoles().length, totalPipelineValue });
-        setRecentProjects(projectsWithTotals);
+
+        const avgMargin = projects.length > 0 ? marginSum / projects.length : 0;
+        setStats({ totalProjects: projects.length, totalRoles: db.getRoles().length, totalPipelineValue, totalCost, totalProfit, avgMargin, approvedCount, pendingCount, draftCount });
+        setRecentProjects(allProjectTotals.slice(0, 5));
+
+        const deptArr = Object.entries(deptCosts).sort((a, b) => b[1] - a[1]).slice(0, 8);
+        const maxDept = deptArr.length > 0 ? deptArr[0][1] : 1;
+        setDeptBreakdown(deptArr.map(([name, cost]) => ({ name, cost, pct: Math.round(cost / maxDept * 100) })));
+
         lucide.createIcons();
       }, [refreshKey]);
 
@@ -1921,10 +1950,45 @@
             </button>
           </div>
           <div className="stats-grid">
-            <div className="stat-card"><div className="stat-label">Total Projects</div><div className="stat-value" style={{color: 'var(--boud-purple)'}}>{stats.totalProjects}</div></div>
-            <div className="stat-card"><div className="stat-label">Role Templates</div><div className="stat-value" style={{color: 'var(--boud-purple)'}}>{stats.totalRoles}</div></div>
+            <div className="stat-card"><div className="stat-label">Total Projects</div><div className="stat-value" style={{color: 'var(--boud-purple)'}}>{stats.totalProjects}</div><div style={{fontSize: 11, marginTop: 4, color: 'var(--text-secondary)'}}>{stats.draftCount} draft · {stats.pendingCount} pending · {stats.approvedCount} approved</div></div>
             <div className="stat-card"><div className="stat-label">Pipeline Value</div><div className="stat-value" style={{color: 'var(--boud-purple)'}}>{formatCurrency(stats.totalPipelineValue)}</div></div>
+            <div className="stat-card"><div className="stat-label">Total Profit</div><div className="stat-value" style={{color: stats.totalProfit >= 0 ? 'var(--success)' : 'var(--error)'}}>{formatCurrency(stats.totalProfit)}</div></div>
+            <div className="stat-card"><div className="stat-label">Avg Margin</div><div className="stat-value" style={{color: stats.avgMargin >= 25 ? 'var(--success)' : stats.avgMargin >= 15 ? 'var(--warning)' : 'var(--error)'}}>{stats.avgMargin.toFixed(1)}%</div></div>
           </div>
+
+          {/* Profitability Breakdown */}
+          {stats.totalCost > 0 && (
+            <div className="card" style={{marginBottom: 16, padding: 20}}>
+              <h3 style={{marginBottom: 12}}>Profitability Overview</h3>
+              <div style={{display: 'flex', gap: 16, alignItems: 'center', marginBottom: 16}}>
+                <div style={{flex: 1}}>
+                  <div style={{height: 28, borderRadius: 6, overflow: 'hidden', display: 'flex', background: 'var(--bg-secondary)'}}>
+                    <div style={{width: `${Math.round(stats.totalCost / stats.totalPipelineValue * 100)}%`, background: 'var(--boud-purple)', transition: 'width 0.3s'}} title={`Cost: ${formatCurrency(stats.totalCost)}`}></div>
+                    <div style={{flex: 1, background: 'var(--success)', opacity: 0.6}} title={`Profit: ${formatCurrency(stats.totalProfit)}`}></div>
+                  </div>
+                  <div style={{display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 12}}>
+                    <span style={{color: 'var(--boud-purple)'}}>Cost: {formatCurrency(stats.totalCost)}</span>
+                    <span style={{color: 'var(--success)'}}>Profit: {formatCurrency(stats.totalProfit)}</span>
+                  </div>
+                </div>
+              </div>
+              {/* Department cost breakdown */}
+              {deptBreakdown.length > 0 && (
+                <div>
+                  <h4 style={{fontSize: 13, color: 'var(--text-secondary)', marginBottom: 8}}>Cost by Department</h4>
+                  {deptBreakdown.map(d => (
+                    <div key={d.name} style={{display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6}}>
+                      <span style={{width: 60, fontSize: 12, textAlign: 'right', color: 'var(--text-secondary)', flexShrink: 0}}>{d.name}</span>
+                      <div style={{flex: 1, height: 16, borderRadius: 4, background: 'var(--bg-secondary)', overflow: 'hidden'}}>
+                        <div style={{height: '100%', width: `${d.pct}%`, background: 'var(--boud-purple)', opacity: 0.7, borderRadius: 4, transition: 'width 0.3s'}}></div>
+                      </div>
+                      <span style={{width: 80, fontSize: 12, fontWeight: 500, textAlign: 'right'}}>{formatCurrency(d.cost)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <div className="card">
             <div className="card-header"><h2>Recent Projects</h2></div>
             {recentProjects.length === 0 ? (
@@ -1934,29 +1998,21 @@
               </div>
             ) : (
               <table>
-                <thead><tr><th>Project</th><th>Client</th><th>Total Cost</th><th>Selling Price</th><th>Margin</th><th></th></tr></thead>
+                <thead><tr><th>Project</th><th>Status</th><th>Client</th><th>Cost</th><th>Price</th><th>Margin</th><th></th></tr></thead>
                 <tbody>
                   {recentProjects.map(p => (
                     <tr key={p.id}>
                       <td>
-                        <div style={{display: 'flex', alignItems: 'center', gap: 8}}>
+                        <div style={{display: 'flex', alignItems: 'center', gap: 6}}>
+                          <div style={{width: 8, height: 8, borderRadius: '50%', background: p.actualMargin >= 25 ? 'var(--success)' : p.actualMargin >= 15 ? 'var(--warning)' : 'var(--error)', flexShrink: 0}}></div>
                           <span style={{fontWeight: 500}}>{p.name}</span>
-                          {p.riskMarginPercent > 0 && (
-                            <span style={{display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 6px', borderRadius: 100, fontSize: 10, fontWeight: 500, background: 'rgba(94, 86, 222, 0.15)', color: 'var(--boud-purple)'}}>
-                              <i data-lucide="shield" style={{width: 10, height: 10}}></i>{p.riskMarginPercent}%
-                            </span>
-                          )}
-                          {p.discountPercent > 0 && (
-                            <span style={{display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 6px', borderRadius: 100, fontSize: 10, fontWeight: 500, background: 'rgba(228, 106, 23, 0.15)', color: 'var(--boud-orange)'}}>
-                              <i data-lucide="tag" style={{width: 10, height: 10}}></i>{p.discountPercent}%
-                            </span>
-                          )}
                         </div>
                       </td>
+                      <td><span className={`badge ${p.status === 'approved' ? 'badge-green' : p.status === 'pending_approval' ? 'badge-yellow' : 'badge-purple'}`} style={{fontSize: 10}}>{p.status === 'approved' ? 'Approved' : p.status === 'pending_approval' ? 'Pending' : 'Draft'}</span></td>
                       <td className="text-secondary">{p.client || '-'}</td>
                       <td>{formatCurrency(p.totalCost)}</td>
                       <td style={{fontWeight: 500}}>{formatCurrency(p.sellingPrice)}</td>
-                      <td><span className={`badge ${p.actualMargin >= 25 ? 'badge-success' : p.actualMargin >= 15 ? 'badge-warning' : 'badge-error'}`}>{p.actualMargin.toFixed(1)}%</span></td>
+                      <td><span style={{fontWeight: 600, color: p.actualMargin >= 25 ? 'var(--success)' : p.actualMargin >= 15 ? 'var(--warning)' : 'var(--error)'}}>{p.actualMargin.toFixed(1)}%</span></td>
                       <td><button className="btn btn-secondary btn-sm" onClick={() => onNavigate('project-pricing', p.id)}>Open</button></td>
                     </tr>
                   ))}
@@ -3884,27 +3940,169 @@
 
     const Insights = ({ refreshKey }) => {
       const [stats, setStats] = React.useState({ totalProjects: 0, pipelineValue: 0, totalProfit: 0, avgMargin: 0 });
+      const [projectMargins, setProjectMargins] = React.useState([]);
+      const [deptMargins, setDeptMargins] = React.useState([]);
+      const [boqCategories, setBoqCategories] = React.useState([]);
+      const [topCostDrivers, setTopCostDrivers] = React.useState([]);
+
       React.useEffect(() => {
         const projects = db.getProjects();
         let pipelineValue = 0, totalProfit = 0, margins = [];
+        const projectData = [];
+        const deptCostMap = {}, deptRevenueMap = {};
+        const catTotals = { internal: 0, external: 0, tools: 0, other: 0 };
+        const costDrivers = [];
+
         projects.forEach(p => {
           const totals = db.calculateProjectTotals(p.id);
           pipelineValue += totals.sellingPrice;
           totalProfit += totals.grossProfit;
           margins.push(totals.actualMargin);
+          projectData.push({ name: p.name, margin: totals.actualMargin, cost: totals.totalCost, price: totals.sellingPrice, status: p.status });
+
+          // BOQ category breakdown
+          const boqItems = db.getBoqItems(p.id);
+          boqItems.forEach(item => {
+            const phase = db.getPhases(p.id).find(ph => ph.id === item.phase_id);
+            const calc = db.calcBoqItemTotal(item, p.target_margin || 0, phase?.margin_percent);
+            catTotals[item.category] = (catTotals[item.category] || 0) + calc.total;
+          });
+
+          // Department data
+          const phases = db.getPhases(p.id);
+          phases.forEach(phase => {
+            db.getResourceCosts(phase.id).forEach(r => {
+              const role = db.getRoles().find(rl => rl.id === r.role_id);
+              const dept = role?.department || 'Other';
+              deptCostMap[dept] = (deptCostMap[dept] || 0) + r.total;
+              costDrivers.push({ name: role?.name || 'Unknown', dept, cost: r.total, project: p.name });
+            });
+          });
         });
+
         const avgMargin = margins.length > 0 ? margins.reduce((a, b) => a + b, 0) / margins.length : 0;
         setStats({ totalProjects: projects.length, pipelineValue, totalProfit, avgMargin });
+        setProjectMargins(projectData.sort((a, b) => b.margin - a.margin));
+
+        // Dept margins
+        const deptArr = Object.entries(deptCostMap).sort((a, b) => b[1] - a[1]).map(([name, cost]) => ({ name, cost }));
+        setDeptMargins(deptArr);
+
+        // BOQ categories
+        const catArr = Object.entries(catTotals).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+        const catTotal = catArr.reduce((s, [, v]) => s + v, 0);
+        setBoqCategories(catArr.map(([name, value]) => ({ name, value, pct: catTotal > 0 ? Math.round(value / catTotal * 100) : 0 })));
+
+        // Top cost drivers
+        setTopCostDrivers(costDrivers.sort((a, b) => b.cost - a.cost).slice(0, 10));
+
         lucide.createIcons();
       }, [refreshKey]);
+
+      const catColors = { internal: 'var(--boud-purple)', external: 'var(--boud-orange)', tools: '#6B7A1A', other: '#6b7280' };
+
       return (
         <div>
-          <div className="page-header"><h1 className="page-title">Insights</h1><p className="text-secondary">Performance metrics</p></div>
+          <div className="page-header"><h1 className="page-title">Insights</h1><p className="text-secondary">Performance analytics and cost intelligence</p></div>
           <div className="stats-grid">
             <div className="stat-card"><div className="stat-label">Total Projects</div><div className="stat-value" style={{color: 'var(--boud-purple)'}}>{stats.totalProjects}</div></div>
             <div className="stat-card"><div className="stat-label">Pipeline Value</div><div className="stat-value" style={{color: 'var(--boud-purple)'}}>{formatCurrency(stats.pipelineValue)}</div></div>
-            <div className="stat-card"><div className="stat-label">Total Profit</div><div className="stat-value" style={{color: 'var(--success)'}}>{formatCurrency(stats.totalProfit)}</div></div>
-            <div className="stat-card"><div className="stat-label">Average Margin</div><div className="stat-value" style={{color: 'var(--boud-purple)'}}>{stats.avgMargin.toFixed(1)}%</div></div>
+            <div className="stat-card"><div className="stat-label">Total Profit</div><div className="stat-value" style={{color: stats.totalProfit >= 0 ? 'var(--success)' : 'var(--error)'}}>{formatCurrency(stats.totalProfit)}</div></div>
+            <div className="stat-card"><div className="stat-label">Average Margin</div><div className="stat-value" style={{color: stats.avgMargin >= 25 ? 'var(--success)' : stats.avgMargin >= 15 ? 'var(--warning)' : 'var(--error)'}}>{stats.avgMargin.toFixed(1)}%</div></div>
+          </div>
+
+          <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16}}>
+            {/* Margin Distribution */}
+            <div className="card" style={{padding: 20}}>
+              <h3 style={{marginBottom: 12}}>Project Margin Distribution</h3>
+              {projectMargins.length === 0 ? (
+                <p className="text-secondary">No projects yet</p>
+              ) : (
+                <div>
+                  {projectMargins.map((p, i) => (
+                    <div key={i} style={{display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8}}>
+                      <div style={{width: 8, height: 8, borderRadius: '50%', background: p.margin >= 25 ? 'var(--success)' : p.margin >= 15 ? 'var(--warning)' : 'var(--error)', flexShrink: 0}}></div>
+                      <span style={{flex: 1, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>{p.name}</span>
+                      <div style={{width: 100, height: 12, borderRadius: 3, background: 'var(--bg-secondary)', overflow: 'hidden', flexShrink: 0}}>
+                        <div style={{height: '100%', width: `${Math.min(Math.max(p.margin, 0), 100)}%`, background: p.margin >= 25 ? 'var(--success)' : p.margin >= 15 ? 'var(--warning)' : 'var(--error)', borderRadius: 3}}></div>
+                      </div>
+                      <span style={{width: 50, textAlign: 'right', fontSize: 13, fontWeight: 600, color: p.margin >= 25 ? 'var(--success)' : p.margin >= 15 ? 'var(--warning)' : 'var(--error)'}}>{p.margin.toFixed(1)}%</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* BOQ Category Breakdown */}
+            <div className="card" style={{padding: 20}}>
+              <h3 style={{marginBottom: 12}}>BOQ by Category</h3>
+              {boqCategories.length === 0 ? (
+                <p className="text-secondary">No BOQ data yet</p>
+              ) : (
+                <div>
+                  {/* Stacked bar */}
+                  <div style={{height: 32, borderRadius: 8, overflow: 'hidden', display: 'flex', marginBottom: 16}}>
+                    {boqCategories.map(c => (
+                      <div key={c.name} style={{width: `${c.pct}%`, background: catColors[c.name] || '#999', transition: 'width 0.3s'}} title={`${c.name}: ${c.pct}%`}></div>
+                    ))}
+                  </div>
+                  {boqCategories.map(c => (
+                    <div key={c.name} style={{display: 'flex', justifyContent: 'space-between', padding: '6px 0', fontSize: 13}}>
+                      <div style={{display: 'flex', alignItems: 'center', gap: 8}}>
+                        <div style={{width: 10, height: 10, borderRadius: 2, background: catColors[c.name] || '#999'}}></div>
+                        <span style={{textTransform: 'capitalize'}}>{c.name}</span>
+                      </div>
+                      <div><span style={{fontWeight: 600}}>{formatCurrency(c.value)}</span> <span className="text-secondary">({c.pct}%)</span></div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Department Cost Analysis */}
+            <div className="card" style={{padding: 20}}>
+              <h3 style={{marginBottom: 12}}>Cost by Department</h3>
+              {deptMargins.length === 0 ? (
+                <p className="text-secondary">No resource data yet</p>
+              ) : (
+                <div>
+                  {deptMargins.map(d => {
+                    const max = deptMargins[0]?.cost || 1;
+                    return (
+                      <div key={d.name} style={{display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8}}>
+                        <span style={{width: 50, fontSize: 12, textAlign: 'right', color: 'var(--text-secondary)', flexShrink: 0}}>{d.name}</span>
+                        <div style={{flex: 1, height: 18, borderRadius: 4, background: 'var(--bg-secondary)', overflow: 'hidden'}}>
+                          <div style={{height: '100%', width: `${Math.round(d.cost / max * 100)}%`, background: 'var(--boud-purple)', opacity: 0.7, borderRadius: 4}}></div>
+                        </div>
+                        <span style={{width: 80, fontSize: 12, fontWeight: 500, textAlign: 'right'}}>{formatCurrency(d.cost)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Top Cost Drivers */}
+            <div className="card" style={{padding: 20}}>
+              <h3 style={{marginBottom: 12}}>Top Cost Drivers</h3>
+              {topCostDrivers.length === 0 ? (
+                <p className="text-secondary">No resource data yet</p>
+              ) : (
+                <table style={{fontSize: 13}}>
+                  <thead><tr><th>Role</th><th>Dept</th><th>Project</th><th style={{textAlign: 'right'}}>Cost</th></tr></thead>
+                  <tbody>
+                    {topCostDrivers.map((d, i) => (
+                      <tr key={i}>
+                        <td style={{fontWeight: 500}}>{d.name}</td>
+                        <td className="text-secondary">{d.dept}</td>
+                        <td className="text-secondary" style={{fontSize: 12}}>{d.project}</td>
+                        <td style={{textAlign: 'right', fontWeight: 600}}>{formatCurrency(d.cost)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
           </div>
         </div>
       );
