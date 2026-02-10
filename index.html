@@ -234,7 +234,7 @@
     const generateId = (prefix = '') => prefix + '_' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
 
     // Schema version for data migrations
-    const SCHEMA_VERSION = 2;
+    const SCHEMA_VERSION = 3;
 
     // Database state stored in memory (will use localStorage for persistence)
     let dbState = {
@@ -250,6 +250,9 @@
       rateHistory: [],
       versionHistory: [],
       changeRequests: [],
+      creditDefinitions: [],
+      clientAgreements: [],
+      packages: [],
       templates: [],
       recentRoles: []
     };
@@ -299,6 +302,61 @@
         });
 
         state.schema_version = 2;
+      }
+
+      if (version < 3) {
+        if (!state.creditDefinitions) state.creditDefinitions = [];
+        if (!state.clientAgreements) state.clientAgreements = [];
+        if (!state.packages) state.packages = [];
+
+        // Seed default credit definitions if empty
+        if (state.creditDefinitions.length === 0) {
+          state.creditDefinitions = [
+            { id: 'cred_1', name: 'Design Hour', type: 'monetary', sar_value: 500, unit_label: 'Design Hour', is_active: true },
+            { id: 'cred_2', name: 'Dev Hour', type: 'monetary', sar_value: 700, unit_label: 'Dev Hour', is_active: true },
+            { id: 'cred_3', name: 'API Call', type: 'usage', sar_value: 0.5, unit_label: 'API Call', is_active: true },
+            { id: 'cred_4', name: 'Support Ticket', type: 'operational', sar_value: 150, unit_label: 'Support Ticket', is_active: true },
+            { id: 'cred_5', name: 'Consultation Hour', type: 'monetary', sar_value: 800, unit_label: 'Consultation Hour', is_active: true }
+          ];
+        }
+
+        // Seed default Hackify packages if empty
+        if (state.packages.length === 0) {
+          state.packages = [
+            {
+              id: 'pkg_1', name: 'Hackify Basic', price_sar: 15000, is_active: true,
+              credit_bundle: [
+                { credit_def_id: 'cred_1', quantity: 10 },
+                { credit_def_id: 'cred_2', quantity: 15 },
+                { credit_def_id: 'cred_4', quantity: 5 }
+              ],
+              included_services: [
+                { service_name: 'UI/UX Design', credit_allocation: 10 },
+                { service_name: 'Frontend Dev', credit_allocation: 15 },
+                { service_name: 'Support', credit_allocation: 5 }
+              ]
+            },
+            {
+              id: 'pkg_2', name: 'Hackify Plus', price_sar: 35000, is_active: true,
+              credit_bundle: [
+                { credit_def_id: 'cred_1', quantity: 25 },
+                { credit_def_id: 'cred_2', quantity: 40 },
+                { credit_def_id: 'cred_3', quantity: 10000 },
+                { credit_def_id: 'cred_4', quantity: 15 },
+                { credit_def_id: 'cred_5', quantity: 5 }
+              ],
+              included_services: [
+                { service_name: 'UI/UX Design', credit_allocation: 25 },
+                { service_name: 'Full-Stack Dev', credit_allocation: 40 },
+                { service_name: 'API Access', credit_allocation: 10000 },
+                { service_name: 'Support', credit_allocation: 15 },
+                { service_name: 'Consultation', credit_allocation: 5 }
+              ]
+            }
+          ];
+        }
+
+        state.schema_version = 3;
       }
 
       return state;
@@ -815,6 +873,81 @@
         }
       },
 
+      // --- Credit Definitions CRUD ---
+      getCreditDefinitions: () => (dbState.creditDefinitions || []).filter(cd => cd.is_active),
+      getAllCreditDefinitions: () => dbState.creditDefinitions || [],
+      addCreditDefinition: (data) => {
+        const id = generateId('cred');
+        dbState.creditDefinitions.push({ id, ...data, is_active: true });
+        saveState();
+        return id;
+      },
+      updateCreditDefinition: (id, data) => {
+        const idx = (dbState.creditDefinitions || []).findIndex(cd => cd.id === id);
+        if (idx !== -1) { Object.assign(dbState.creditDefinitions[idx], data); saveState(); }
+      },
+      deleteCreditDefinition: (id) => {
+        const idx = (dbState.creditDefinitions || []).findIndex(cd => cd.id === id);
+        if (idx !== -1) { dbState.creditDefinitions[idx].is_active = false; saveState(); }
+      },
+
+      // --- Client Agreements CRUD ---
+      getClientAgreements: () => dbState.clientAgreements || [],
+      getClientAgreement: (id) => (dbState.clientAgreements || []).find(a => a.id === id),
+      addClientAgreement: (data) => {
+        const id = generateId('agmt');
+        dbState.clientAgreements.push({ id, ...data, created_at: new Date().toISOString() });
+        saveState();
+        return id;
+      },
+      updateClientAgreement: (id, data) => {
+        const idx = (dbState.clientAgreements || []).findIndex(a => a.id === id);
+        if (idx !== -1) { Object.assign(dbState.clientAgreements[idx], data); saveState(); }
+      },
+      consumeCredits: (agreementId, creditDefId, amount) => {
+        const agmt = (dbState.clientAgreements || []).find(a => a.id === agreementId);
+        if (!agmt) return false;
+        const pool = agmt.credit_pool.find(cp => cp.credit_def_id === creditDefId);
+        if (!pool || pool.remaining < amount) return false;
+        pool.consumed += amount;
+        pool.remaining -= amount;
+        saveState();
+        return true;
+      },
+
+      // --- Packages CRUD ---
+      getPackages: () => (dbState.packages || []).filter(p => p.is_active),
+      getAllPackages: () => dbState.packages || [],
+      addPackage: (data) => {
+        const id = generateId('pkg');
+        dbState.packages.push({ id, ...data, is_active: true });
+        saveState();
+        return id;
+      },
+      updatePackage: (id, data) => {
+        const idx = (dbState.packages || []).findIndex(p => p.id === id);
+        if (idx !== -1) { Object.assign(dbState.packages[idx], data); saveState(); }
+      },
+      applyPackageToProject: (projectId, packageId) => {
+        const pkg = (dbState.packages || []).find(p => p.id === packageId);
+        if (!pkg) return;
+        // Auto-populate BOQ items from package services
+        pkg.included_services.forEach((svc, i) => {
+          const creditDef = pkg.credit_bundle[i];
+          const cred = creditDef ? (dbState.creditDefinitions || []).find(cd => cd.id === creditDef.credit_def_id) : null;
+          db.addBoqItem(projectId, null, {
+            name: svc.service_name,
+            category: 'internal',
+            quantity: svc.credit_allocation,
+            unit_type: cred?.unit_label || 'credits',
+            unit_price: cred?.sar_value || 0,
+            margin_percent: null
+          });
+        });
+        db.updateProject(projectId, { applied_package_id: packageId });
+        addVersionHistory(projectId, 'package_applied', `Package "${pkg.name}" applied`);
+      },
+
       calculateProjectTotals: (projectId) => {
         const phases = db.getPhases(projectId);
         const project = db.getProject(projectId);
@@ -1283,6 +1416,7 @@
         { id: 'dashboard', label: 'Dashboard', icon: 'layout-dashboard' },
         { id: 'insights', label: 'Insights', icon: 'bar-chart-3' },
         { id: 'projects', label: 'Projects', icon: 'folder-open' },
+        { id: 'credits', label: 'Credits & Packages', icon: 'coins' },
         { id: 'templates', label: 'Templates', icon: 'file-stack' },
       ];
 
@@ -2239,6 +2373,7 @@
       const [resourceForm, setResourceForm] = React.useState({ role_id: '', days: '', daily_rate_override: '', notes: '' });
       const [isCrPanelOpen, setIsCrPanelOpen] = React.useState(false);
       const [isCrModalOpen, setIsCrModalOpen] = React.useState(false);
+      const [isPackageSelectorOpen, setIsPackageSelectorOpen] = React.useState(false);
       const [crForm, setCrForm] = React.useState({ field_path: '', old_value: '', new_value: '', reason: '', label: '' });
       const [changeRequests, setChangeRequests] = React.useState([]);
 
@@ -2442,6 +2577,35 @@
               <button className="btn btn-secondary" onClick={() => { setPhaseForm({ name: '', margin_percent: '' }); setEditingItem(null); setIsPhaseModalOpen(true); }}>
                 <i data-lucide="plus" style={{width: 16, height: 16}}></i> Add Phase
               </button>
+              {!project.applied_package_id && (
+                <div style={{position: 'relative'}}>
+                  <button className="btn btn-secondary" onClick={() => setIsPackageSelectorOpen(!isPackageSelectorOpen)}>
+                    <i data-lucide="package" style={{width: 16, height: 16}}></i> Apply Package
+                  </button>
+                  {isPackageSelectorOpen && (
+                    <div style={{position: 'absolute', top: '100%', left: 0, marginTop: 4, background: 'var(--bg-primary)', border: '1px solid var(--border)', borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.2)', padding: 8, zIndex: 100, minWidth: 250}}>
+                      {db.getPackages().map(pkg => (
+                        <button key={pkg.id} className="btn btn-sm" style={{width: '100%', justifyContent: 'flex-start', marginBottom: 4}} onClick={() => {
+                          if (confirm(`Apply "${pkg.name}" (${formatCurrency(pkg.price_sar)}) to this project? This will add BOQ items from the package.`)) {
+                            db.applyPackageToProject(projectId, pkg.id);
+                            loadData();
+                            setIsPackageSelectorOpen(false);
+                          }
+                        }}>
+                          <span style={{fontWeight: 600}}>{pkg.name}</span>
+                          <span className="text-secondary" style={{marginLeft: 8}}>{formatCurrency(pkg.price_sar)}</span>
+                        </button>
+                      ))}
+                      {db.getPackages().length === 0 && <p className="text-secondary" style={{fontSize: 12, padding: 8}}>No packages available. Create one in Credits & Packages.</p>}
+                    </div>
+                  )}
+                </div>
+              )}
+              {project.applied_package_id && (
+                <span className="badge badge-purple" style={{padding: '6px 12px', fontSize: 12}}>
+                  <i data-lucide="package" style={{width: 14, height: 14}}></i> {db.getAllPackages().find(p => p.id === project.applied_package_id)?.name || 'Package Applied'}
+                </span>
+              )}
             </div>
           ) : (
             <div style={{display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center'}}>
@@ -3052,6 +3216,328 @@
       );
     };
 
+    // Credits & Packages Management
+    const CreditsAndPackages = ({ onRefresh }) => {
+      const [activeTab, setActiveTab] = React.useState('definitions');
+      const [creditDefs, setCreditDefs] = React.useState([]);
+      const [packages, setPackages] = React.useState([]);
+      const [agreements, setAgreements] = React.useState([]);
+      const [isModalOpen, setIsModalOpen] = React.useState(false);
+      const [editingItem, setEditingItem] = React.useState(null);
+      const [form, setForm] = React.useState({ name: '', type: 'monetary', sar_value: '', unit_label: '' });
+      const [isPkgModalOpen, setIsPkgModalOpen] = React.useState(false);
+      const [pkgForm, setPkgForm] = React.useState({ name: '', price_sar: '', credit_bundle: [], included_services: [] });
+      const [editingPkg, setEditingPkg] = React.useState(null);
+
+      const loadData = () => {
+        setCreditDefs(db.getAllCreditDefinitions().filter(cd => cd.is_active));
+        setPackages(db.getPackages());
+        setAgreements(db.getClientAgreements());
+        setTimeout(() => lucide.createIcons(), 0);
+      };
+      React.useEffect(() => { loadData(); }, []);
+
+      const CREDIT_TYPES = [
+        { value: 'monetary', label: 'Monetary (SAR)', color: 'var(--boud-purple)' },
+        { value: 'usage', label: 'Usage-Based', color: 'var(--boud-orange)' },
+        { value: 'operational', label: 'Operational', color: 'var(--success)' }
+      ];
+
+      const handleSaveCreditDef = () => {
+        const data = { name: form.name, type: form.type, sar_value: parseFloat(form.sar_value) || 0, unit_label: form.unit_label || form.name };
+        if (editingItem) { db.updateCreditDefinition(editingItem.id, data); }
+        else { db.addCreditDefinition(data); }
+        setIsModalOpen(false); setEditingItem(null);
+        setForm({ name: '', type: 'monetary', sar_value: '', unit_label: '' });
+        loadData();
+      };
+
+      const handleEditCreditDef = (cd) => {
+        setEditingItem(cd);
+        setForm({ name: cd.name, type: cd.type, sar_value: cd.sar_value.toString(), unit_label: cd.unit_label || '' });
+        setIsModalOpen(true);
+      };
+
+      const handleSavePackage = () => {
+        const data = {
+          name: pkgForm.name,
+          price_sar: parseFloat(pkgForm.price_sar) || 0,
+          credit_bundle: pkgForm.credit_bundle,
+          included_services: pkgForm.included_services
+        };
+        if (editingPkg) { db.updatePackage(editingPkg.id, data); }
+        else { db.addPackage(data); }
+        setIsPkgModalOpen(false); setEditingPkg(null);
+        setPkgForm({ name: '', price_sar: '', credit_bundle: [], included_services: [] });
+        loadData();
+      };
+
+      const getTypeColor = (type) => {
+        const t = CREDIT_TYPES.find(ct => ct.value === type);
+        return t ? t.color : 'var(--gray-text)';
+      };
+
+      return (
+        <div>
+          <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24}}>
+            <h1 className="page-title">Credits & Packages</h1>
+          </div>
+
+          <div className="tabs" style={{marginBottom: 20}}>
+            <button className={`tab ${activeTab === 'definitions' ? 'active' : ''}`} onClick={() => setActiveTab('definitions')}>Credit Types</button>
+            <button className={`tab ${activeTab === 'packages' ? 'active' : ''}`} onClick={() => setActiveTab('packages')}>
+              Hackify Packages {packages.length > 0 && <span className="badge badge-purple" style={{marginLeft: 6, fontSize: 11}}>{packages.length}</span>}
+            </button>
+            <button className={`tab ${activeTab === 'agreements' ? 'active' : ''}`} onClick={() => setActiveTab('agreements')}>
+              Client Agreements {agreements.length > 0 && <span className="badge badge-green" style={{marginLeft: 6, fontSize: 11}}>{agreements.length}</span>}
+            </button>
+          </div>
+
+          {/* Credit Definitions Tab */}
+          {activeTab === 'definitions' && (
+            <div>
+              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16}}>
+                <p className="text-secondary">{creditDefs.length} credit types defined</p>
+                <button className="btn btn-primary btn-sm" onClick={() => { setEditingItem(null); setForm({ name: '', type: 'monetary', sar_value: '', unit_label: '' }); setIsModalOpen(true); }}>
+                  <i data-lucide="plus" style={{width: 14, height: 14}}></i> Add Credit Type
+                </button>
+              </div>
+              <div style={{display: 'grid', gap: 12}}>
+                {creditDefs.map(cd => (
+                  <div key={cd.id} className="card" style={{padding: 16}}>
+                    <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                      <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
+                        <div style={{width: 40, height: 40, borderRadius: 10, background: `${getTypeColor(cd.type)}20`, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
+                          <i data-lucide={cd.type === 'monetary' ? 'banknote' : cd.type === 'usage' ? 'activity' : 'headphones'} style={{width: 20, height: 20, color: getTypeColor(cd.type)}}></i>
+                        </div>
+                        <div>
+                          <div style={{fontWeight: 600}}>{cd.name}</div>
+                          <div style={{fontSize: 12, color: 'var(--text-secondary)'}}>
+                            <span className="badge" style={{background: `${getTypeColor(cd.type)}20`, color: getTypeColor(cd.type), fontSize: 10, marginRight: 6}}>{cd.type}</span>
+                            {cd.unit_label} — {formatCurrency(cd.sar_value)} per unit
+                          </div>
+                        </div>
+                      </div>
+                      <div className="actions">
+                        <button className="btn btn-icon btn-sm" onClick={() => handleEditCreditDef(cd)}><i data-lucide="edit-2" style={{width: 14, height: 14}}></i></button>
+                        <button className="btn btn-icon btn-sm" onClick={() => { db.deleteCreditDefinition(cd.id); loadData(); }} style={{color: 'var(--error)'}}><i data-lucide="trash-2" style={{width: 14, height: 14}}></i></button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Packages Tab */}
+          {activeTab === 'packages' && (
+            <div>
+              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16}}>
+                <p className="text-secondary">Hackify productized packages</p>
+                <button className="btn btn-primary btn-sm" onClick={() => {
+                  setEditingPkg(null);
+                  setPkgForm({ name: '', price_sar: '', credit_bundle: creditDefs.map(cd => ({ credit_def_id: cd.id, quantity: 0 })), included_services: [] });
+                  setIsPkgModalOpen(true);
+                }}>
+                  <i data-lucide="plus" style={{width: 14, height: 14}}></i> Add Package
+                </button>
+              </div>
+              <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))', gap: 16}}>
+                {packages.map(pkg => {
+                  const totalCreditValue = (pkg.credit_bundle || []).reduce((sum, cb) => {
+                    const cd = creditDefs.find(c => c.id === cb.credit_def_id);
+                    return sum + (cd ? cd.sar_value * cb.quantity : 0);
+                  }, 0);
+                  return (
+                    <div key={pkg.id} className="card" style={{padding: 0, overflow: 'hidden'}}>
+                      <div style={{background: 'var(--boud-purple)', color: 'white', padding: '16px 20px'}}>
+                        <h3 style={{margin: 0, fontSize: 18}}>{pkg.name}</h3>
+                        <div style={{fontSize: 24, fontWeight: 700, marginTop: 4}}>{formatCurrency(pkg.price_sar)}</div>
+                        {totalCreditValue > 0 && (
+                          <div style={{fontSize: 12, opacity: 0.8, marginTop: 4}}>Credit value: {formatCurrency(totalCreditValue)} ({totalCreditValue > pkg.price_sar ? 'Premium' : Math.round((1 - pkg.price_sar / totalCreditValue) * 100) + '% savings'})</div>
+                        )}
+                      </div>
+                      <div style={{padding: '16px 20px'}}>
+                        <h4 style={{fontSize: 13, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--gray-text)', marginBottom: 8}}>Credit Bundle</h4>
+                        {(pkg.credit_bundle || []).filter(cb => cb.quantity > 0).map(cb => {
+                          const cd = creditDefs.find(c => c.id === cb.credit_def_id);
+                          return cd ? (
+                            <div key={cb.credit_def_id} style={{display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 13}}>
+                              <span>{cd.name}</span>
+                              <span style={{fontWeight: 600}}>{cb.quantity.toLocaleString()} {cd.unit_label}</span>
+                            </div>
+                          ) : null;
+                        })}
+                        <h4 style={{fontSize: 13, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--gray-text)', marginBottom: 8, marginTop: 12}}>Included Services</h4>
+                        {(pkg.included_services || []).map((svc, i) => (
+                          <div key={i} style={{display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 13}}>
+                            <span>{svc.service_name}</span>
+                            <span className="text-secondary">{svc.credit_allocation} credits</span>
+                          </div>
+                        ))}
+                        <div style={{display: 'flex', gap: 8, marginTop: 12}}>
+                          <button className="btn btn-sm btn-secondary" onClick={() => {
+                            setEditingPkg(pkg);
+                            setPkgForm({ name: pkg.name, price_sar: pkg.price_sar.toString(), credit_bundle: pkg.credit_bundle || [], included_services: pkg.included_services || [] });
+                            setIsPkgModalOpen(true);
+                          }}>Edit</button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Agreements Tab */}
+          {activeTab === 'agreements' && (
+            <div>
+              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16}}>
+                <p className="text-secondary">{agreements.length} client agreements</p>
+                <button className="btn btn-primary btn-sm" onClick={() => {
+                  const name = prompt('Client name:');
+                  if (name) {
+                    db.addClientAgreement({
+                      client_name: name,
+                      project_id: null,
+                      credit_pool: creditDefs.map(cd => ({ credit_def_id: cd.id, allocated: 0, consumed: 0, remaining: 0 })),
+                      expiry_date: null,
+                      is_transferable: false
+                    });
+                    loadData();
+                  }
+                }}>
+                  <i data-lucide="plus" style={{width: 14, height: 14}}></i> Add Agreement
+                </button>
+              </div>
+              {agreements.length === 0 ? (
+                <div className="card" style={{textAlign: 'center', padding: 32}}>
+                  <i data-lucide="handshake" style={{width: 40, height: 40, color: 'var(--gray-text)', marginBottom: 12}}></i>
+                  <p className="text-secondary">No client agreements yet. Create one to start tracking credit allocation.</p>
+                </div>
+              ) : (
+                <div style={{display: 'grid', gap: 12}}>
+                  {agreements.map(agmt => {
+                    const totalAllocated = agmt.credit_pool.reduce((s, cp) => s + cp.allocated, 0);
+                    const totalConsumed = agmt.credit_pool.reduce((s, cp) => s + cp.consumed, 0);
+                    const pct = totalAllocated > 0 ? Math.round(totalConsumed / totalAllocated * 100) : 0;
+                    return (
+                      <div key={agmt.id} className="card" style={{padding: 16}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8}}>
+                          <h3 style={{margin: 0, fontSize: 16}}>{agmt.client_name}</h3>
+                          <span className="text-secondary" style={{fontSize: 12}}>{new Date(agmt.created_at).toLocaleDateString()}</span>
+                        </div>
+                        {totalAllocated > 0 && (
+                          <div style={{marginBottom: 8}}>
+                            <div style={{display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4}}>
+                              <span>Utilization</span><span style={{fontWeight: 600}}>{pct}%</span>
+                            </div>
+                            <div style={{height: 6, background: 'var(--bg-secondary)', borderRadius: 3, overflow: 'hidden'}}>
+                              <div style={{height: '100%', width: `${pct}%`, background: pct > 80 ? 'var(--error)' : pct > 50 ? 'var(--warning)' : 'var(--success)', borderRadius: 3, transition: 'width 0.3s'}}></div>
+                            </div>
+                          </div>
+                        )}
+                        <div style={{display: 'flex', flexWrap: 'wrap', gap: 8}}>
+                          {agmt.credit_pool.filter(cp => cp.allocated > 0).map(cp => {
+                            const cd = creditDefs.find(c => c.id === cp.credit_def_id);
+                            return cd ? (
+                              <div key={cp.credit_def_id} style={{padding: '4px 8px', borderRadius: 6, fontSize: 11, background: 'var(--bg-secondary)'}}>
+                                {cd.name}: {cp.consumed}/{cp.allocated}
+                              </div>
+                            ) : null;
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Credit Definition Modal */}
+          {isModalOpen && (
+            <div className="modal-overlay" onClick={() => setIsModalOpen(false)}>
+              <div className="modal" style={{maxWidth: 450}} onClick={e => e.stopPropagation()}>
+                <div className="modal-header"><h3>{editingItem ? 'Edit Credit Type' : 'Add Credit Type'}</h3><button className="btn btn-icon" onClick={() => setIsModalOpen(false)}><i data-lucide="x" style={{width: 20, height: 20}}></i></button></div>
+                <div className="modal-body">
+                  <div className="form-group"><label className="form-label">Name *</label><input type="text" className="form-input" value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder="e.g., Design Hour, API Call" /></div>
+                  <div className="form-group">
+                    <label className="form-label">Type *</label>
+                    <select className="form-input" value={form.type} onChange={e => setForm({...form, type: e.target.value})}>
+                      {CREDIT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    </select>
+                  </div>
+                  <div className="form-group"><label className="form-label">SAR Value per Unit *</label><input type="number" className="form-input" value={form.sar_value} onChange={e => setForm({...form, sar_value: e.target.value})} placeholder="e.g., 500" /></div>
+                  <div className="form-group"><label className="form-label">Unit Label</label><input type="text" className="form-input" value={form.unit_label} onChange={e => setForm({...form, unit_label: e.target.value})} placeholder="e.g., API Call, Design Hour" /></div>
+                </div>
+                <div className="modal-footer"><button className="btn btn-secondary" onClick={() => setIsModalOpen(false)}>Cancel</button><button className="btn btn-primary" disabled={!form.name || !form.sar_value} onClick={handleSaveCreditDef}>Save</button></div>
+              </div>
+            </div>
+          )}
+
+          {/* Package Modal */}
+          {isPkgModalOpen && (
+            <div className="modal-overlay" onClick={() => setIsPkgModalOpen(false)}>
+              <div className="modal" style={{maxWidth: 600}} onClick={e => e.stopPropagation()}>
+                <div className="modal-header"><h3>{editingPkg ? 'Edit Package' : 'Add Package'}</h3><button className="btn btn-icon" onClick={() => setIsPkgModalOpen(false)}><i data-lucide="x" style={{width: 20, height: 20}}></i></button></div>
+                <div className="modal-body">
+                  <div className="form-row">
+                    <div className="form-group"><label className="form-label">Package Name *</label><input type="text" className="form-input" value={pkgForm.name} onChange={e => setPkgForm({...pkgForm, name: e.target.value})} placeholder="e.g., Hackify Basic" /></div>
+                    <div className="form-group"><label className="form-label">Price (SAR) *</label><input type="number" className="form-input" value={pkgForm.price_sar} onChange={e => setPkgForm({...pkgForm, price_sar: e.target.value})} /></div>
+                  </div>
+                  <h4 style={{marginTop: 16, marginBottom: 8}}>Credit Bundle</h4>
+                  {creditDefs.map(cd => {
+                    const existing = pkgForm.credit_bundle.find(cb => cb.credit_def_id === cd.id);
+                    return (
+                      <div key={cd.id} style={{display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8}}>
+                        <span style={{flex: 1, fontSize: 13}}>{cd.name} ({formatCurrency(cd.sar_value)}/unit)</span>
+                        <input type="number" className="form-input" style={{width: 100}} value={existing?.quantity || ''} placeholder="0"
+                          onChange={e => {
+                            const qty = parseInt(e.target.value) || 0;
+                            const updated = pkgForm.credit_bundle.filter(cb => cb.credit_def_id !== cd.id);
+                            if (qty > 0) updated.push({ credit_def_id: cd.id, quantity: qty });
+                            setPkgForm({...pkgForm, credit_bundle: updated});
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                  <h4 style={{marginTop: 16, marginBottom: 8}}>Included Services</h4>
+                  {(pkgForm.included_services || []).map((svc, i) => (
+                    <div key={i} style={{display: 'flex', gap: 8, marginBottom: 8}}>
+                      <input type="text" className="form-input" style={{flex: 1}} value={svc.service_name} placeholder="Service name"
+                        onChange={e => {
+                          const updated = [...pkgForm.included_services];
+                          updated[i] = {...updated[i], service_name: e.target.value};
+                          setPkgForm({...pkgForm, included_services: updated});
+                        }}
+                      />
+                      <input type="number" className="form-input" style={{width: 80}} value={svc.credit_allocation} placeholder="Credits"
+                        onChange={e => {
+                          const updated = [...pkgForm.included_services];
+                          updated[i] = {...updated[i], credit_allocation: parseInt(e.target.value) || 0};
+                          setPkgForm({...pkgForm, included_services: updated});
+                        }}
+                      />
+                      <button className="btn btn-icon btn-sm" onClick={() => {
+                        setPkgForm({...pkgForm, included_services: pkgForm.included_services.filter((_, idx) => idx !== i)});
+                      }} style={{color: 'var(--error)'}}><i data-lucide="x" style={{width: 14, height: 14}}></i></button>
+                    </div>
+                  ))}
+                  <button className="btn btn-sm btn-secondary" onClick={() => setPkgForm({...pkgForm, included_services: [...(pkgForm.included_services || []), { service_name: '', credit_allocation: 0 }]})}>
+                    <i data-lucide="plus" style={{width: 12, height: 12}}></i> Add Service
+                  </button>
+                </div>
+                <div className="modal-footer"><button className="btn btn-secondary" onClick={() => setIsPkgModalOpen(false)}>Cancel</button><button className="btn btn-primary" disabled={!pkgForm.name || !pkgForm.price_sar} onClick={handleSavePackage}>Save Package</button></div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
     const ProjectsList = ({ onNavigate, refreshKey, onRefresh }) => {
       const [projects, setProjects] = React.useState([]);
       const [isModalOpen, setIsModalOpen] = React.useState(false);
@@ -3274,6 +3760,7 @@
           case 'product-fees': return <ProductFees onRefresh={triggerRefresh} />;
           case 'projects': return <ProjectsList onNavigate={handleNavigate} refreshKey={refreshKey} onRefresh={triggerRefresh} />;
           case 'project-pricing': return <ProjectPricing projectId={selectedProjectId} onBack={() => handleNavigate('projects')} onRefresh={triggerRefresh} onNavigate={handleNavigate} />;
+          case 'credits': return <CreditsAndPackages onRefresh={triggerRefresh} />;
           case 'templates': return <TemplatesLibrary onNavigate={handleNavigate} onRefresh={triggerRefresh} />;
           case 'settings': return <Settings onRefresh={triggerRefresh} />;
           default: return <Dashboard onNavigate={handleNavigate} refreshKey={refreshKey} />;
