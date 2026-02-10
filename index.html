@@ -233,8 +233,12 @@
     // Simple UUID generator
     const generateId = (prefix = '') => prefix + '_' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
 
+    // Schema version for data migrations
+    const SCHEMA_VERSION = 2;
+
     // Database state stored in memory (will use localStorage for persistence)
     let dbState = {
+      schema_version: SCHEMA_VERSION,
       roles: [],
       tools: [],
       projects: [],
@@ -242,124 +246,174 @@
       resourceCosts: [],
       toolCosts: [],
       vendorCosts: [],
+      boqItems: [],
       rateHistory: [],
       versionHistory: [],
+      changeRequests: [],
       templates: [],
       recentRoles: []
+    };
+
+    // Migrate data from older schema versions
+    const migrateState = (state) => {
+      const version = state.schema_version || 1;
+
+      // Ensure new collections exist
+      if (!state.versionHistory) state.versionHistory = [];
+      if (!state.templates) state.templates = [];
+      if (!state.boqItems) state.boqItems = [];
+      if (!state.changeRequests) state.changeRequests = [];
+
+      // Migration v1 → v2: hourly_rate → daily_rate, hours → days
+      if (version < 2) {
+        // Convert role rates: daily_rate = hourly_rate * 5 (1 day = 5 hours)
+        state.roles.forEach(role => {
+          if (role.hourly_rate !== undefined && role.daily_rate === undefined) {
+            role.daily_rate = Math.round(role.hourly_rate * 5 * 100) / 100;
+          }
+        });
+
+        // Convert resource costs: hours → days
+        state.resourceCosts.forEach(rc => {
+          if (rc.hours !== undefined && rc.days === undefined) {
+            rc.days = Math.round((rc.hours / 5) * 100) / 100;
+          }
+          // Convert rate_override from hourly to daily
+          if (rc.rate_override && rc.daily_rate_override === undefined) {
+            rc.daily_rate_override = Math.round(rc.rate_override * 5 * 100) / 100;
+          }
+        });
+
+        // Add margin_percent to phases
+        state.phases.forEach(phase => {
+          if (phase.margin_percent === undefined) phase.margin_percent = null;
+        });
+
+        // Add status to projects if missing
+        state.projects.forEach(project => {
+          if (!project.status) project.status = 'draft';
+          // Add duration_months if missing
+          if (project.duration_months === undefined) {
+            project.duration_months = project.duration_weeks ? Math.round(project.duration_weeks / 4.33) : null;
+          }
+        });
+
+        state.schema_version = 2;
+      }
+
+      return state;
     };
 
     // Load from localStorage
     const loadState = () => {
       const saved = localStorage.getItem('boud_pricing_state');
       if (saved) {
-        dbState = JSON.parse(saved);
-        // Ensure new fields exist
-        if (!dbState.versionHistory) dbState.versionHistory = [];
-        if (!dbState.templates) dbState.templates = [];
+        dbState = migrateState(JSON.parse(saved));
+        saveState();
       } else {
         // Seed initial data - 89 roles from Resources Pricing List
         dbState.roles = [
-          // Product Owner (PO)
-          { id: 'role_1', name: 'Senior Consultant - PO', hourly_rate: 710, department: 'PO', grade: 7 },
-          { id: 'role_2', name: 'Consultant - PO', hourly_rate: 600, department: 'PO', grade: 8 },
-          { id: 'role_3', name: 'Associate Consultant - PO', hourly_rate: 450, department: 'PO', grade: 9 },
-          { id: 'role_4', name: 'Senior Specialist - PO', hourly_rate: 250, department: 'PO', grade: 10 },
-          { id: 'role_5', name: 'Specialist - PO', hourly_rate: 190, department: 'PO', grade: 11 },
-          { id: 'role_6', name: 'Senior Analyst - PO', hourly_rate: 142.5, department: 'PO', grade: 12 },
-          { id: 'role_7', name: 'Junior Analyst - PO', hourly_rate: 110, department: 'PO', grade: 13 },
-          { id: 'role_8', name: 'Intern - PO', hourly_rate: 15, department: 'PO', grade: 14 },
+          // Product Owner (PO) — daily_rate = hourly_rate * 5 (1 day = 5 hours)
+          { id: 'role_1', name: 'Senior Consultant - PO', hourly_rate: 710, daily_rate: 3550, department: 'PO', grade: 7 },
+          { id: 'role_2', name: 'Consultant - PO', hourly_rate: 600, daily_rate: 3000, department: 'PO', grade: 8 },
+          { id: 'role_3', name: 'Associate Consultant - PO', hourly_rate: 450, daily_rate: 2250, department: 'PO', grade: 9 },
+          { id: 'role_4', name: 'Senior Specialist - PO', hourly_rate: 250, daily_rate: 1250, department: 'PO', grade: 10 },
+          { id: 'role_5', name: 'Specialist - PO', hourly_rate: 190, daily_rate: 950, department: 'PO', grade: 11 },
+          { id: 'role_6', name: 'Senior Analyst - PO', hourly_rate: 142.5, daily_rate: 712.5, department: 'PO', grade: 12 },
+          { id: 'role_7', name: 'Junior Analyst - PO', hourly_rate: 110, daily_rate: 550, department: 'PO', grade: 13 },
+          { id: 'role_8', name: 'Intern - PO', hourly_rate: 15, daily_rate: 75, department: 'PO', grade: 14 },
           // Project Management (PM)
-          { id: 'role_9', name: 'Senior Consultant - PM', hourly_rate: 560, department: 'PM', grade: 7 },
-          { id: 'role_10', name: 'Consultant - PM', hourly_rate: 450, department: 'PM', grade: 8 },
-          { id: 'role_11', name: 'Associate Consultant - PM', hourly_rate: 350, department: 'PM', grade: 9 },
-          { id: 'role_12', name: 'Senior Specialist - PM', hourly_rate: 220, department: 'PM', grade: 10 },
-          { id: 'role_13', name: 'Specialist - PM', hourly_rate: 150, department: 'PM', grade: 11 },
-          { id: 'role_14', name: 'Senior Analyst - PM', hourly_rate: 100, department: 'PM', grade: 12 },
-          { id: 'role_15', name: 'Junior Analyst - PM', hourly_rate: 70, department: 'PM', grade: 13 },
-          { id: 'role_16', name: 'Intern - PM', hourly_rate: 30, department: 'PM', grade: 14 },
+          { id: 'role_9', name: 'Senior Consultant - PM', hourly_rate: 560, daily_rate: 2800, department: 'PM', grade: 7 },
+          { id: 'role_10', name: 'Consultant - PM', hourly_rate: 450, daily_rate: 2250, department: 'PM', grade: 8 },
+          { id: 'role_11', name: 'Associate Consultant - PM', hourly_rate: 350, daily_rate: 1750, department: 'PM', grade: 9 },
+          { id: 'role_12', name: 'Senior Specialist - PM', hourly_rate: 220, daily_rate: 1100, department: 'PM', grade: 10 },
+          { id: 'role_13', name: 'Specialist - PM', hourly_rate: 150, daily_rate: 750, department: 'PM', grade: 11 },
+          { id: 'role_14', name: 'Senior Analyst - PM', hourly_rate: 100, daily_rate: 500, department: 'PM', grade: 12 },
+          { id: 'role_15', name: 'Junior Analyst - PM', hourly_rate: 70, daily_rate: 350, department: 'PM', grade: 13 },
+          { id: 'role_16', name: 'Intern - PM', hourly_rate: 30, daily_rate: 150, department: 'PM', grade: 14 },
           // Business Analysis (BA)
-          { id: 'role_17', name: 'Senior Consultant - BA', hourly_rate: 350, department: 'BA', grade: 7 },
-          { id: 'role_18', name: 'Consultant - BA', hourly_rate: 300, department: 'BA', grade: 8 },
-          { id: 'role_19', name: 'Associate Consultant - BA', hourly_rate: 250, department: 'BA', grade: 9 },
-          { id: 'role_20', name: 'Senior Specialist - BA', hourly_rate: 200, department: 'BA', grade: 10 },
-          { id: 'role_21', name: 'Specialist - BA', hourly_rate: 170, department: 'BA', grade: 11 },
-          { id: 'role_22', name: 'Senior Analyst - BA', hourly_rate: 140, department: 'BA', grade: 12 },
-          { id: 'role_23', name: 'Junior Analyst - BA', hourly_rate: 100, department: 'BA', grade: 13 },
-          { id: 'role_24', name: 'Intern - BA', hourly_rate: 30, department: 'BA', grade: 14 },
+          { id: 'role_17', name: 'Senior Consultant - BA', hourly_rate: 350, daily_rate: 1750, department: 'BA', grade: 7 },
+          { id: 'role_18', name: 'Consultant - BA', hourly_rate: 300, daily_rate: 1500, department: 'BA', grade: 8 },
+          { id: 'role_19', name: 'Associate Consultant - BA', hourly_rate: 250, daily_rate: 1250, department: 'BA', grade: 9 },
+          { id: 'role_20', name: 'Senior Specialist - BA', hourly_rate: 200, daily_rate: 1000, department: 'BA', grade: 10 },
+          { id: 'role_21', name: 'Specialist - BA', hourly_rate: 170, daily_rate: 850, department: 'BA', grade: 11 },
+          { id: 'role_22', name: 'Senior Analyst - BA', hourly_rate: 140, daily_rate: 700, department: 'BA', grade: 12 },
+          { id: 'role_23', name: 'Junior Analyst - BA', hourly_rate: 100, daily_rate: 500, department: 'BA', grade: 13 },
+          { id: 'role_24', name: 'Intern - BA', hourly_rate: 30, daily_rate: 150, department: 'BA', grade: 14 },
           // UX/UI Design (UXUI)
-          { id: 'role_25', name: 'Senior Consultant - UXUI', hourly_rate: 450, department: 'UXUI', grade: 7 },
-          { id: 'role_26', name: 'Consultant - UXUI', hourly_rate: 300, department: 'UXUI', grade: 8 },
-          { id: 'role_27', name: 'Associate Consultant - UXUI', hourly_rate: 200, department: 'UXUI', grade: 9 },
-          { id: 'role_28', name: 'Senior Specialist - UXUI', hourly_rate: 160, department: 'UXUI', grade: 10 },
-          { id: 'role_29', name: 'Specialist - UXUI', hourly_rate: 125, department: 'UXUI', grade: 11 },
-          { id: 'role_30', name: 'Senior Analyst - UXUI', hourly_rate: 95, department: 'UXUI', grade: 12 },
-          { id: 'role_31', name: 'Junior Analyst - UXUI', hourly_rate: 57, department: 'UXUI', grade: 13 },
-          { id: 'role_32', name: 'Intern - UXUI', hourly_rate: 30, department: 'UXUI', grade: 14 },
+          { id: 'role_25', name: 'Senior Consultant - UXUI', hourly_rate: 450, daily_rate: 2250, department: 'UXUI', grade: 7 },
+          { id: 'role_26', name: 'Consultant - UXUI', hourly_rate: 300, daily_rate: 1500, department: 'UXUI', grade: 8 },
+          { id: 'role_27', name: 'Associate Consultant - UXUI', hourly_rate: 200, daily_rate: 1000, department: 'UXUI', grade: 9 },
+          { id: 'role_28', name: 'Senior Specialist - UXUI', hourly_rate: 160, daily_rate: 800, department: 'UXUI', grade: 10 },
+          { id: 'role_29', name: 'Specialist - UXUI', hourly_rate: 125, daily_rate: 625, department: 'UXUI', grade: 11 },
+          { id: 'role_30', name: 'Senior Analyst - UXUI', hourly_rate: 95, daily_rate: 475, department: 'UXUI', grade: 12 },
+          { id: 'role_31', name: 'Junior Analyst - UXUI', hourly_rate: 57, daily_rate: 285, department: 'UXUI', grade: 13 },
+          { id: 'role_32', name: 'Intern - UXUI', hourly_rate: 30, daily_rate: 150, department: 'UXUI', grade: 14 },
           // Front End (FE)
-          { id: 'role_33', name: 'Senior Consultant Engineer - FE', hourly_rate: 250, department: 'FE', grade: 7 },
-          { id: 'role_34', name: 'Consultant Engineer - FE', hourly_rate: 200, department: 'FE', grade: 8 },
-          { id: 'role_35', name: 'Associate Consultant Engineer - FE', hourly_rate: 160, department: 'FE', grade: 9 },
-          { id: 'role_36', name: 'Senior Specialist - FE', hourly_rate: 120, department: 'FE', grade: 10 },
-          { id: 'role_37', name: 'Specialist - FE', hourly_rate: 80, department: 'FE', grade: 11 },
-          { id: 'role_38', name: 'Senior Analyst - FE', hourly_rate: 45, department: 'FE', grade: 12 },
-          { id: 'role_39', name: 'Junior Analyst - FE', hourly_rate: 45, department: 'FE', grade: 13 },
-          { id: 'role_40', name: 'Intern - FE', hourly_rate: 30, department: 'FE', grade: 14 },
+          { id: 'role_33', name: 'Senior Consultant Engineer - FE', hourly_rate: 250, daily_rate: 1250, department: 'FE', grade: 7 },
+          { id: 'role_34', name: 'Consultant Engineer - FE', hourly_rate: 200, daily_rate: 1000, department: 'FE', grade: 8 },
+          { id: 'role_35', name: 'Associate Consultant Engineer - FE', hourly_rate: 160, daily_rate: 800, department: 'FE', grade: 9 },
+          { id: 'role_36', name: 'Senior Specialist - FE', hourly_rate: 120, daily_rate: 600, department: 'FE', grade: 10 },
+          { id: 'role_37', name: 'Specialist - FE', hourly_rate: 80, daily_rate: 400, department: 'FE', grade: 11 },
+          { id: 'role_38', name: 'Senior Analyst - FE', hourly_rate: 45, daily_rate: 225, department: 'FE', grade: 12 },
+          { id: 'role_39', name: 'Junior Analyst - FE', hourly_rate: 45, daily_rate: 225, department: 'FE', grade: 13 },
+          { id: 'role_40', name: 'Intern - FE', hourly_rate: 30, daily_rate: 150, department: 'FE', grade: 14 },
           // Mobile Development (Mobile)
-          { id: 'role_41', name: 'Senior Consultant Engineer - Mobile', hourly_rate: 350, department: 'Mobile', grade: 7 },
-          { id: 'role_42', name: 'Consultant Engineer - Mobile', hourly_rate: 250, department: 'Mobile', grade: 8 },
-          { id: 'role_43', name: 'Associate Consultant Engineer - Mobile', hourly_rate: 200, department: 'Mobile', grade: 9 },
-          { id: 'role_44', name: 'Senior Specialist - Mobile', hourly_rate: 140, department: 'Mobile', grade: 10 },
-          { id: 'role_45', name: 'Specialist - Mobile', hourly_rate: 80, department: 'Mobile', grade: 11 },
-          { id: 'role_46', name: 'Senior Analyst - Mobile', hourly_rate: 57, department: 'Mobile', grade: 12 },
-          { id: 'role_47', name: 'Junior Analyst - Mobile', hourly_rate: 40, department: 'Mobile', grade: 13 },
-          { id: 'role_48', name: 'Intern - Mobile', hourly_rate: 30, department: 'Mobile', grade: 14 },
+          { id: 'role_41', name: 'Senior Consultant Engineer - Mobile', hourly_rate: 350, daily_rate: 1750, department: 'Mobile', grade: 7 },
+          { id: 'role_42', name: 'Consultant Engineer - Mobile', hourly_rate: 250, daily_rate: 1250, department: 'Mobile', grade: 8 },
+          { id: 'role_43', name: 'Associate Consultant Engineer - Mobile', hourly_rate: 200, daily_rate: 1000, department: 'Mobile', grade: 9 },
+          { id: 'role_44', name: 'Senior Specialist - Mobile', hourly_rate: 140, daily_rate: 700, department: 'Mobile', grade: 10 },
+          { id: 'role_45', name: 'Specialist - Mobile', hourly_rate: 80, daily_rate: 400, department: 'Mobile', grade: 11 },
+          { id: 'role_46', name: 'Senior Analyst - Mobile', hourly_rate: 57, daily_rate: 285, department: 'Mobile', grade: 12 },
+          { id: 'role_47', name: 'Junior Analyst - Mobile', hourly_rate: 40, daily_rate: 200, department: 'Mobile', grade: 13 },
+          { id: 'role_48', name: 'Intern - Mobile', hourly_rate: 30, daily_rate: 150, department: 'Mobile', grade: 14 },
           // Back End (BE)
-          { id: 'role_49', name: 'Senior Consultant Engineer - BE', hourly_rate: 250, department: 'BE', grade: 7 },
-          { id: 'role_50', name: 'Consultant Engineer - BE', hourly_rate: 190, department: 'BE', grade: 8 },
-          { id: 'role_51', name: 'Associate Consultant Engineer - BE', hourly_rate: 150, department: 'BE', grade: 9 },
-          { id: 'role_52', name: 'Senior Specialist - BE', hourly_rate: 115, department: 'BE', grade: 10 },
-          { id: 'role_53', name: 'Specialist - BE', hourly_rate: 90, department: 'BE', grade: 11 },
-          { id: 'role_54', name: 'Senior Analyst - BE', hourly_rate: 70, department: 'BE', grade: 12 },
-          { id: 'role_55', name: 'Junior Analyst - BE', hourly_rate: 50, department: 'BE', grade: 13 },
-          { id: 'role_56', name: 'Intern - BE', hourly_rate: 30, department: 'BE', grade: 14 },
+          { id: 'role_49', name: 'Senior Consultant Engineer - BE', hourly_rate: 250, daily_rate: 1250, department: 'BE', grade: 7 },
+          { id: 'role_50', name: 'Consultant Engineer - BE', hourly_rate: 190, daily_rate: 950, department: 'BE', grade: 8 },
+          { id: 'role_51', name: 'Associate Consultant Engineer - BE', hourly_rate: 150, daily_rate: 750, department: 'BE', grade: 9 },
+          { id: 'role_52', name: 'Senior Specialist - BE', hourly_rate: 115, daily_rate: 575, department: 'BE', grade: 10 },
+          { id: 'role_53', name: 'Specialist - BE', hourly_rate: 90, daily_rate: 450, department: 'BE', grade: 11 },
+          { id: 'role_54', name: 'Senior Analyst - BE', hourly_rate: 70, daily_rate: 350, department: 'BE', grade: 12 },
+          { id: 'role_55', name: 'Junior Analyst - BE', hourly_rate: 50, daily_rate: 250, department: 'BE', grade: 13 },
+          { id: 'role_56', name: 'Intern - BE', hourly_rate: 30, daily_rate: 150, department: 'BE', grade: 14 },
           // Quality Assurance (QA)
-          { id: 'role_57', name: 'Senior Consultant - QA', hourly_rate: 250, department: 'QA', grade: 7 },
-          { id: 'role_58', name: 'Consultant - QA', hourly_rate: 190, department: 'QA', grade: 8 },
-          { id: 'role_59', name: 'Associate Consultant - QA', hourly_rate: 150, department: 'QA', grade: 9 },
-          { id: 'role_60', name: 'Senior Specialist - QA', hourly_rate: 115, department: 'QA', grade: 10 },
-          { id: 'role_61', name: 'Specialist - QA', hourly_rate: 90, department: 'QA', grade: 11 },
-          { id: 'role_62', name: 'Senior Analyst - QA', hourly_rate: 70, department: 'QA', grade: 12 },
-          { id: 'role_63', name: 'Junior Analyst - QA', hourly_rate: 50, department: 'QA', grade: 13 },
-          { id: 'role_64', name: 'Intern - QA', hourly_rate: 30, department: 'QA', grade: 14 },
+          { id: 'role_57', name: 'Senior Consultant - QA', hourly_rate: 250, daily_rate: 1250, department: 'QA', grade: 7 },
+          { id: 'role_58', name: 'Consultant - QA', hourly_rate: 190, daily_rate: 950, department: 'QA', grade: 8 },
+          { id: 'role_59', name: 'Associate Consultant - QA', hourly_rate: 150, daily_rate: 750, department: 'QA', grade: 9 },
+          { id: 'role_60', name: 'Senior Specialist - QA', hourly_rate: 115, daily_rate: 575, department: 'QA', grade: 10 },
+          { id: 'role_61', name: 'Specialist - QA', hourly_rate: 90, daily_rate: 450, department: 'QA', grade: 11 },
+          { id: 'role_62', name: 'Senior Analyst - QA', hourly_rate: 70, daily_rate: 350, department: 'QA', grade: 12 },
+          { id: 'role_63', name: 'Junior Analyst - QA', hourly_rate: 50, daily_rate: 250, department: 'QA', grade: 13 },
+          { id: 'role_64', name: 'Intern - QA', hourly_rate: 30, daily_rate: 150, department: 'QA', grade: 14 },
           // Scrum Master (SM)
-          { id: 'role_65', name: 'Senior Consultant - SM', hourly_rate: 250, department: 'SM', grade: 7 },
-          { id: 'role_66', name: 'Consultant - SM', hourly_rate: 190, department: 'SM', grade: 8 },
-          { id: 'role_67', name: 'Associate Consultant - SM', hourly_rate: 150, department: 'SM', grade: 9 },
-          { id: 'role_68', name: 'Senior Specialist - SM', hourly_rate: 115, department: 'SM', grade: 10 },
-          { id: 'role_69', name: 'Specialist - SM', hourly_rate: 90, department: 'SM', grade: 11 },
-          { id: 'role_70', name: 'Senior Analyst - SM', hourly_rate: 70, department: 'SM', grade: 12 },
-          { id: 'role_71', name: 'Junior Analyst - SM', hourly_rate: 50, department: 'SM', grade: 13 },
-          { id: 'role_72', name: 'Intern - SM', hourly_rate: 30, department: 'SM', grade: 14 },
+          { id: 'role_65', name: 'Senior Consultant - SM', hourly_rate: 250, daily_rate: 1250, department: 'SM', grade: 7 },
+          { id: 'role_66', name: 'Consultant - SM', hourly_rate: 190, daily_rate: 950, department: 'SM', grade: 8 },
+          { id: 'role_67', name: 'Associate Consultant - SM', hourly_rate: 150, daily_rate: 750, department: 'SM', grade: 9 },
+          { id: 'role_68', name: 'Senior Specialist - SM', hourly_rate: 115, daily_rate: 575, department: 'SM', grade: 10 },
+          { id: 'role_69', name: 'Specialist - SM', hourly_rate: 90, daily_rate: 450, department: 'SM', grade: 11 },
+          { id: 'role_70', name: 'Senior Analyst - SM', hourly_rate: 70, daily_rate: 350, department: 'SM', grade: 12 },
+          { id: 'role_71', name: 'Junior Analyst - SM', hourly_rate: 50, daily_rate: 250, department: 'SM', grade: 13 },
+          { id: 'role_72', name: 'Intern - SM', hourly_rate: 30, daily_rate: 150, department: 'SM', grade: 14 },
           // CMS Development (CMS)
-          { id: 'role_73', name: 'Senior Consultant - CMS', hourly_rate: 250, department: 'CMS', grade: 7 },
-          { id: 'role_74', name: 'Consultant - CMS', hourly_rate: 190, department: 'CMS', grade: 8 },
-          { id: 'role_75', name: 'Associate Consultant - CMS', hourly_rate: 150, department: 'CMS', grade: 9 },
-          { id: 'role_76', name: 'Senior Specialist - CMS', hourly_rate: 115, department: 'CMS', grade: 10 },
-          { id: 'role_77', name: 'Specialist - CMS', hourly_rate: 90, department: 'CMS', grade: 11 },
-          { id: 'role_78', name: 'Senior Analyst - CMS', hourly_rate: 70, department: 'CMS', grade: 12 },
-          { id: 'role_79', name: 'Junior Analyst - CMS', hourly_rate: 50, department: 'CMS', grade: 13 },
-          { id: 'role_80', name: 'Intern - CMS', hourly_rate: 30, department: 'CMS', grade: 14 },
+          { id: 'role_73', name: 'Senior Consultant - CMS', hourly_rate: 250, daily_rate: 1250, department: 'CMS', grade: 7 },
+          { id: 'role_74', name: 'Consultant - CMS', hourly_rate: 190, daily_rate: 950, department: 'CMS', grade: 8 },
+          { id: 'role_75', name: 'Associate Consultant - CMS', hourly_rate: 150, daily_rate: 750, department: 'CMS', grade: 9 },
+          { id: 'role_76', name: 'Senior Specialist - CMS', hourly_rate: 115, daily_rate: 575, department: 'CMS', grade: 10 },
+          { id: 'role_77', name: 'Specialist - CMS', hourly_rate: 90, daily_rate: 450, department: 'CMS', grade: 11 },
+          { id: 'role_78', name: 'Senior Analyst - CMS', hourly_rate: 70, daily_rate: 350, department: 'CMS', grade: 12 },
+          { id: 'role_79', name: 'Junior Analyst - CMS', hourly_rate: 50, daily_rate: 250, department: 'CMS', grade: 13 },
+          { id: 'role_80', name: 'Intern - CMS', hourly_rate: 30, daily_rate: 150, department: 'CMS', grade: 14 },
           // Data Analytics (DA)
-          { id: 'role_81', name: 'Senior Consultant - DA', hourly_rate: 490.91, department: 'DA', grade: 7 },
-          { id: 'role_82', name: 'Consultant - DA', hourly_rate: 409.09, department: 'DA', grade: 8 },
-          { id: 'role_83', name: 'Associate Consultant - DA', hourly_rate: 318.18, department: 'DA', grade: 9 },
-          { id: 'role_84', name: 'Senior Specialist - DA', hourly_rate: 227.27, department: 'DA', grade: 10 },
-          { id: 'role_85', name: 'Specialist - DA', hourly_rate: 181.82, department: 'DA', grade: 11 },
-          { id: 'role_86', name: 'Senior Analyst - DA', hourly_rate: 159.09, department: 'DA', grade: 12 },
-          { id: 'role_87', name: 'Junior Analyst - DA', hourly_rate: 136.36, department: 'DA', grade: 13 },
-          { id: 'role_88', name: 'Intern - DA', hourly_rate: 45.45, department: 'DA', grade: 14 },
+          { id: 'role_81', name: 'Senior Consultant - DA', hourly_rate: 490.91, daily_rate: 2454.55, department: 'DA', grade: 7 },
+          { id: 'role_82', name: 'Consultant - DA', hourly_rate: 409.09, daily_rate: 2045.45, department: 'DA', grade: 8 },
+          { id: 'role_83', name: 'Associate Consultant - DA', hourly_rate: 318.18, daily_rate: 1590.9, department: 'DA', grade: 9 },
+          { id: 'role_84', name: 'Senior Specialist - DA', hourly_rate: 227.27, daily_rate: 1136.35, department: 'DA', grade: 10 },
+          { id: 'role_85', name: 'Specialist - DA', hourly_rate: 181.82, daily_rate: 909.1, department: 'DA', grade: 11 },
+          { id: 'role_86', name: 'Senior Analyst - DA', hourly_rate: 159.09, daily_rate: 795.45, department: 'DA', grade: 12 },
+          { id: 'role_87', name: 'Junior Analyst - DA', hourly_rate: 136.36, daily_rate: 681.8, department: 'DA', grade: 13 },
+          { id: 'role_88', name: 'Intern - DA', hourly_rate: 45.45, daily_rate: 227.25, department: 'DA', grade: 14 },
           // Other
-          { id: 'role_89', name: 'Web Designer', hourly_rate: 109.09, department: 'Design', grade: 15 }
+          { id: 'role_89', name: 'Web Designer', hourly_rate: 109.09, daily_rate: 545.45, department: 'Design', grade: 15 }
         ];
         dbState.tools = [
           { id: 'tool_1', name: 'AWS Cloud Services', cost_type: 'monthly', cost: 500, description: 'Cloud infrastructure' },
@@ -371,6 +425,9 @@
         ];
         dbState.versionHistory = [];
         dbState.templates = [];
+        dbState.boqItems = [];
+        dbState.changeRequests = [];
+        dbState.schema_version = SCHEMA_VERSION;
         saveState();
       }
     };
@@ -409,19 +466,21 @@
     // Database operations
     const db = {
       getRoles: () => [...dbState.roles],
-      createRole: (name, hourly_rate, description) => {
+      createRole: (name, daily_rate, description) => {
         const id = generateId('role');
-        dbState.roles.push({ id, name, hourly_rate, description, updated_at: new Date().toISOString() });
+        const hourly_rate = Math.round((daily_rate / 5) * 100) / 100;
+        dbState.roles.push({ id, name, daily_rate, hourly_rate, description, updated_at: new Date().toISOString() });
         saveState();
         return id;
       },
-      updateRole: (id, name, hourly_rate, description) => {
+      updateRole: (id, name, daily_rate, description) => {
         const idx = dbState.roles.findIndex(r => r.id === id);
         if (idx !== -1) {
-          const oldRate = dbState.roles[idx].hourly_rate;
-          dbState.roles[idx] = { ...dbState.roles[idx], name, hourly_rate, description, updated_at: new Date().toISOString() };
-          if (oldRate !== hourly_rate) {
-            dbState.rateHistory.push({ id: generateId('hist'), role_id: id, old_rate: oldRate, new_rate: hourly_rate, changed_at: new Date().toISOString() });
+          const oldRate = dbState.roles[idx].daily_rate;
+          const hourly_rate = Math.round((daily_rate / 5) * 100) / 100;
+          dbState.roles[idx] = { ...dbState.roles[idx], name, daily_rate, hourly_rate, description, updated_at: new Date().toISOString() };
+          if (oldRate !== daily_rate) {
+            dbState.rateHistory.push({ id: generateId('hist'), role_id: id, old_rate: oldRate, new_rate: daily_rate, changed_at: new Date().toISOString() });
           }
           saveState();
         }
@@ -513,6 +572,8 @@
         });
         dbState.phases = dbState.phases.filter(p => p.project_id !== id);
         dbState.projects = dbState.projects.filter(p => p.id !== id);
+        dbState.boqItems = (dbState.boqItems || []).filter(b => b.project_id !== id);
+        dbState.changeRequests = (dbState.changeRequests || []).filter(cr => cr.project_id !== id);
         dbState.versionHistory = dbState.versionHistory.filter(v => v.project_id !== id);
         saveState();
       },
@@ -528,10 +589,14 @@
         saveState();
         return id;
       },
-      updatePhase: (id, name) => {
+      updatePhase: (id, updates) => {
         const idx = dbState.phases.findIndex(p => p.id === id);
         if (idx !== -1) {
-          dbState.phases[idx].name = name;
+          if (typeof updates === 'string') {
+            dbState.phases[idx].name = updates;
+          } else {
+            Object.assign(dbState.phases[idx], updates);
+          }
           saveState();
         }
       },
@@ -550,20 +615,21 @@
       getResourceCosts: (phaseId) => {
         return dbState.resourceCosts.filter(rc => rc.phase_id === phaseId).map(rc => {
           const role = dbState.roles.find(r => r.id === rc.role_id);
-          const effectiveRate = rc.rate_override || role?.hourly_rate || 0;
-          return { ...rc, role_name: role?.name || 'Unknown', default_rate: role?.hourly_rate, effective_rate: effectiveRate, total: rc.hours * effectiveRate };
+          const days = rc.days || (rc.hours ? rc.hours / 5 : 0);
+          const effectiveDailyRate = rc.daily_rate_override || role?.daily_rate || (role?.hourly_rate ? role.hourly_rate * 5 : 0);
+          return { ...rc, days, role_name: role?.name || 'Unknown', default_daily_rate: role?.daily_rate, effective_daily_rate: effectiveDailyRate, total: days * effectiveDailyRate };
         });
       },
-      addResourceCost: (phaseId, roleId, hours, rateOverride, notes) => {
+      addResourceCost: (phaseId, roleId, days, dailyRateOverride, notes) => {
         const id = generateId('rc');
-        dbState.resourceCosts.push({ id, phase_id: phaseId, role_id: roleId, hours, rate_override: rateOverride, notes });
+        dbState.resourceCosts.push({ id, phase_id: phaseId, role_id: roleId, days, daily_rate_override: dailyRateOverride, notes });
         saveState();
         return id;
       },
-      updateResourceCost: (id, hours, rateOverride, notes) => {
+      updateResourceCost: (id, days, dailyRateOverride, notes) => {
         const idx = dbState.resourceCosts.findIndex(rc => rc.id === id);
         if (idx !== -1) {
-          dbState.resourceCosts[idx] = { ...dbState.resourceCosts[idx], hours, rate_override: rateOverride, notes };
+          dbState.resourceCosts[idx] = { ...dbState.resourceCosts[idx], days, daily_rate_override: dailyRateOverride, notes };
           saveState();
         }
       },
@@ -612,10 +678,61 @@
         saveState();
       },
 
+      // BOQ Items CRUD
+      getBoqItems: (projectId) => {
+        return (dbState.boqItems || []).filter(b => b.project_id === projectId).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+      },
+      addBoqItem: (projectId, phaseId, data) => {
+        const id = generateId('boq');
+        const existing = (dbState.boqItems || []).filter(b => b.project_id === projectId);
+        const item = {
+          id, project_id: projectId, phase_id: phaseId || null,
+          name: data.name || '',
+          category: data.category || 'internal',
+          quantity: data.quantity || 1,
+          unit_type: data.unit_type || 'days',
+          unit_price: data.unit_price || 0,
+          margin_percent: data.margin_percent !== undefined ? data.margin_percent : null,
+          resource_ids: data.resource_ids || [],
+          sort_order: existing.length,
+          created_at: new Date().toISOString()
+        };
+        if (!dbState.boqItems) dbState.boqItems = [];
+        dbState.boqItems.push(item);
+        addVersionHistory(projectId, 'boq_added', `BOQ item "${data.name}" added`);
+        saveState();
+        return id;
+      },
+      updateBoqItem: (id, data) => {
+        const idx = (dbState.boqItems || []).findIndex(b => b.id === id);
+        if (idx !== -1) {
+          dbState.boqItems[idx] = { ...dbState.boqItems[idx], ...data, updated_at: new Date().toISOString() };
+          saveState();
+        }
+      },
+      deleteBoqItem: (id) => {
+        const item = (dbState.boqItems || []).find(b => b.id === id);
+        if (item) {
+          addVersionHistory(item.project_id, 'boq_deleted', `BOQ item "${item.name}" removed`);
+        }
+        dbState.boqItems = (dbState.boqItems || []).filter(b => b.id !== id);
+        saveState();
+      },
+
+      // Calculate BOQ item total with margin
+      calcBoqItemTotal: (item, projectMargin, phaseMargin) => {
+        const baseTotal = (item.quantity || 0) * (item.unit_price || 0);
+        // Margin cascade: line-item > phase > project
+        const margin = item.margin_percent !== null && item.margin_percent !== undefined
+          ? item.margin_percent
+          : (phaseMargin !== null && phaseMargin !== undefined ? phaseMargin : (projectMargin || 0));
+        return { baseTotal, margin, total: baseTotal * (1 + margin / 100) };
+      },
+
       calculateProjectTotals: (projectId) => {
         const phases = db.getPhases(projectId);
         const project = db.getProject(projectId);
-        let totalResourceCost = 0, totalToolCost = 0, totalVendorCost = 0, totalHours = 0;
+        let totalResourceCost = 0, totalToolCost = 0, totalVendorCost = 0, totalDays = 0;
 
         phases.forEach(phase => {
           const resources = db.getResourceCosts(phase.id);
@@ -624,7 +741,16 @@
           totalResourceCost += resources.reduce((sum, r) => sum + r.total, 0);
           totalToolCost += tools.reduce((sum, t) => sum + t.total, 0);
           totalVendorCost += vendors.reduce((sum, v) => sum + v.cost, 0);
-          totalHours += resources.reduce((sum, r) => sum + r.hours, 0);
+          totalDays += resources.reduce((sum, r) => sum + (r.days || 0), 0);
+        });
+
+        // BOQ totals
+        const boqItems = db.getBoqItems(projectId);
+        let totalBoqValue = 0;
+        boqItems.forEach(item => {
+          const phase = phases.find(p => p.id === item.phase_id);
+          const { total } = db.calcBoqItemTotal(item, project?.target_margin || 0, phase?.margin_percent);
+          totalBoqValue += total;
         });
 
         // SaaS recurring revenue
@@ -685,7 +811,7 @@
         const actualMargin = sellingPrice > 0 ? (grossProfit / sellingPrice) * 100 : 0;
 
         return {
-          totalResourceCost, totalToolCost, totalVendorCost, totalHourlyCost, totalHours,
+          totalResourceCost, totalToolCost, totalVendorCost, totalHourlyCost, totalDays,
           hourlySellingPrice,
           saasMonthly, saasYearly, saasAnnualRevenue,
           setupFee,
@@ -694,6 +820,7 @@
           riskMarginPercent, riskMarginAmount,
           discountPercent, discountAmount, subtotal,
           totalCost, sellingPrice, grossProfit, targetMargin, actualMargin,
+          totalBoqValue, boqItemCount: boqItems.length,
           pricingModels: project?.pricing_models || ['hourly']
         };
       }
@@ -810,8 +937,8 @@
               <thead><tr><th>Item</th><th>Details</th><th style="text-align:right">Amount</th></tr></thead>
               <tbody>
                 ${phases.map(phase => `
-                  <tr class="phase-name"><td colspan="3">${phase.name}</td></tr>
-                  ${phase.resources.map(r => `<tr><td style="padding-left:24px">${r.role_name}</td><td>${r.hours} hrs @ SAR ${r.rate}/hr</td><td style="text-align:right">SAR ${r.total.toLocaleString()}</td></tr>`).join('')}
+                  <tr class="phase-name"><td colspan="3">${phase.name}${phase.margin_percent != null ? ` (${phase.margin_percent}% margin)` : ''}</td></tr>
+                  ${phase.resources.map(r => `<tr><td style="padding-left:24px">${r.role_name}</td><td>${r.days} days @ SAR ${r.effective_daily_rate?.toLocaleString()}/day</td><td style="text-align:right">SAR ${r.total.toLocaleString()}</td></tr>`).join('')}
                   ${phase.tools.map(t => `<tr><td style="padding-left:24px">${t.tool_name}</td><td>${t.cost_type === 'monthly' ? 'Monthly' : t.cost_type === 'yearly' ? 'Yearly' : 'One-time'}</td><td style="text-align:right">SAR ${t.total.toLocaleString()}</td></tr>`).join('')}
                   ${phase.vendors.map(v => `<tr><td style="padding-left:24px">${v.vendor_name}</td><td>${v.description || 'Vendor'}</td><td style="text-align:right">SAR ${v.cost.toLocaleString()}</td></tr>`).join('')}
                 `).join('')}
@@ -819,6 +946,27 @@
               </tbody>
             </table>
           </div>
+
+          ${(() => {
+            const boqItems = db.getBoqItems(project.id);
+            if (boqItems.length === 0) return '';
+            const categories = {internal: 'Internal', external: 'External', tools: 'Tools', other: 'Other'};
+            return `
+            <div class="section">
+              <h2>Bill of Quantities (BOQ)</h2>
+              <table>
+                <thead><tr><th>#</th><th>Item</th><th>Category</th><th>Qty</th><th>Unit</th><th>Unit Price</th><th>Margin%</th><th style="text-align:right">Total</th></tr></thead>
+                <tbody>
+                  ${boqItems.map((item, i) => {
+                    const phase = dbState.phases.find(p => p.id === item.phase_id);
+                    const calc = db.calcBoqItemTotal(item, project.target_margin || 0, phase?.margin_percent);
+                    return `<tr><td>${i+1}</td><td>${item.name}</td><td>${categories[item.category] || item.category}</td><td>${item.quantity}</td><td>${item.unit_type || '-'}</td><td>SAR ${(item.unit_price || 0).toLocaleString()}</td><td>${calc.margin}%</td><td style="text-align:right">SAR ${Math.round(calc.total).toLocaleString()}</td></tr>`;
+                  }).join('')}
+                  <tr class="subtotal"><td colspan="7">BOQ Total</td><td style="text-align:right">SAR ${Math.round(totals.totalBoqValue).toLocaleString()}</td></tr>
+                </tbody>
+              </table>
+            </div>`;
+          })()}
 
           <div class="pricing-summary">
             <h2>Pricing Summary</h2>
@@ -869,7 +1017,7 @@
 
       phases.forEach(phase => {
         phase.resources.forEach(r => {
-          rows.push([phase.name, r.role_name, 'Resource', r.hours + ' hrs @ ' + r.rate + '/hr', r.total]);
+          rows.push([phase.name, r.role_name, 'Resource', r.days + ' days @ ' + (r.effective_daily_rate || 0) + '/day', r.total]);
         });
         phase.tools.forEach(t => {
           rows.push([phase.name, t.tool_name, 'Tool', t.cost_type === 'monthly' ? 'Monthly' : t.cost_type === 'yearly' ? 'Yearly' : 'One-time', t.total]);
@@ -878,6 +1026,20 @@
           rows.push([phase.name, v.vendor_name, 'Vendor', v.description || '', v.cost]);
         });
       });
+
+      // BOQ items
+      const boqItems = db.getBoqItems(project.id);
+      if (boqItems.length > 0) {
+        rows.push([]);
+        rows.push(['BILL OF QUANTITIES']);
+        rows.push(['Item', 'Category', 'Qty', 'Unit', 'Unit Price', 'Margin%', 'Total']);
+        boqItems.forEach(item => {
+          const phase = dbState.phases.find(p => p.id === item.phase_id);
+          const calc = db.calcBoqItemTotal(item, project.target_margin || 0, phase?.margin_percent);
+          rows.push([item.name, item.category, item.quantity, item.unit_type || '-', item.unit_price, calc.margin + '%', Math.round(calc.total)]);
+        });
+        rows.push(['BOQ Total', '', '', '', '', '', Math.round(totals.totalBoqValue)]);
+      }
 
       rows.push([]);
 
@@ -1309,7 +1471,7 @@
         <div className="role-selector" ref={dropdownRef}>
           <div className={`role-selector-trigger ${isOpen ? 'open' : ''}`} onClick={() => setIsOpen(!isOpen)}>
             {selectedRole ? (
-              <span><strong>{selectedRole.name}</strong> - {formatCurrency(selectedRole.hourly_rate)}/hr</span>
+              <span><strong>{selectedRole.name}</strong> - {formatCurrency(selectedRole.daily_rate || selectedRole.hourly_rate * 5)}/day</span>
             ) : (
               <span className="role-selector-placeholder">Select a role...</span>
             )}
@@ -1337,7 +1499,7 @@
                           <span className="role-selector-item-name">{role.name}</span>
                           <span className="role-selector-item-dept">{role.department}</span>
                         </div>
-                        <span className="role-selector-item-rate">{formatCurrency(role.hourly_rate)}/hr</span>
+                        <span className="role-selector-item-rate">{formatCurrency(role.daily_rate || role.hourly_rate * 5)}/day</span>
                       </div>
                     ))}
                   </div>
@@ -1353,7 +1515,7 @@
                           <span className="role-selector-item-name">{role.name}</span>
                           {activeDept === 'all' && <span className="role-selector-item-dept">{role.department}</span>}
                         </div>
-                        <span className="role-selector-item-rate">{formatCurrency(role.hourly_rate)}/hr</span>
+                        <span className="role-selector-item-rate">{formatCurrency(role.daily_rate || role.hourly_rate * 5)}/day</span>
                       </div>
                     ))
                   )}
@@ -1495,6 +1657,241 @@
     // [Additional components continue - Rates, Tools, Projects, Settings, etc.]
     // For brevity, I'll include the key new features and modified components
 
+    // BOQ Table Component
+    const BOQTable = ({ projectId, projectMargin }) => {
+      const [items, setItems] = React.useState([]);
+      const [phases, setPhases] = React.useState([]);
+      const [isAddOpen, setIsAddOpen] = React.useState(false);
+      const [editingId, setEditingId] = React.useState(null);
+      const [form, setForm] = React.useState({ name: '', category: 'internal', quantity: '1', unit_type: 'days', unit_price: '', margin_percent: '', phase_id: '' });
+
+      const CATEGORIES = [
+        { value: 'internal', label: 'Internal' },
+        { value: 'external', label: 'External' },
+        { value: 'tools', label: 'Tools' },
+        { value: 'other', label: 'Other' }
+      ];
+      const UNIT_TYPES = ['days', 'hours', 'units', 'months', 'licenses', 'fixed'];
+
+      const loadData = () => {
+        setItems(db.getBoqItems(projectId));
+        setPhases(db.getPhases(projectId));
+        setTimeout(() => lucide.createIcons(), 0);
+      };
+      React.useEffect(() => { loadData(); }, [projectId]);
+
+      const handleSave = () => {
+        const data = {
+          name: form.name,
+          category: form.category,
+          quantity: parseFloat(form.quantity) || 1,
+          unit_type: form.unit_type,
+          unit_price: parseFloat(form.unit_price) || 0,
+          margin_percent: form.margin_percent !== '' ? parseFloat(form.margin_percent) : null,
+        };
+        if (editingId) {
+          db.updateBoqItem(editingId, data);
+        } else {
+          db.addBoqItem(projectId, form.phase_id || null, data);
+        }
+        setIsAddOpen(false);
+        setEditingId(null);
+        setForm({ name: '', category: 'internal', quantity: '1', unit_type: 'days', unit_price: '', margin_percent: '', phase_id: '' });
+        loadData();
+      };
+
+      const handleEdit = (item) => {
+        setEditingId(item.id);
+        setForm({
+          name: item.name, category: item.category, quantity: item.quantity.toString(),
+          unit_type: item.unit_type, unit_price: item.unit_price.toString(),
+          margin_percent: item.margin_percent !== null && item.margin_percent !== undefined ? item.margin_percent.toString() : '',
+          phase_id: item.phase_id || ''
+        });
+        setIsAddOpen(true);
+      };
+
+      const handleDelete = (id) => {
+        if (confirm('Remove this BOQ item?')) {
+          db.deleteBoqItem(id);
+          loadData();
+        }
+      };
+
+      const getMarginColor = (margin) => {
+        if (margin >= 30) return 'var(--success)';
+        if (margin >= 10) return 'var(--warning)';
+        if (margin >= 0) return 'var(--boud-orange)';
+        return 'var(--error)';
+      };
+
+      const getCategoryBadge = (cat) => {
+        const styles = {
+          internal: { bg: 'rgba(94, 86, 222, 0.15)', color: 'var(--boud-purple)' },
+          external: { bg: 'rgba(228, 106, 23, 0.15)', color: 'var(--boud-orange)' },
+          tools: { bg: 'rgba(222, 247, 99, 0.3)', color: '#6B7A1A' },
+          other: { bg: 'rgba(156, 163, 175, 0.2)', color: '#6b7280' }
+        };
+        const s = styles[cat] || styles.other;
+        return <span className="badge" style={{background: s.bg, color: s.color}}>{cat}</span>;
+      };
+
+      // Calculate totals by category
+      let grandTotal = 0;
+      const catTotals = { internal: 0, external: 0, tools: 0, other: 0 };
+      items.forEach(item => {
+        const phase = phases.find(p => p.id === item.phase_id);
+        const { total, margin } = db.calcBoqItemTotal(item, projectMargin, phase?.margin_percent);
+        grandTotal += total;
+        catTotals[item.category] = (catTotals[item.category] || 0) + total;
+      });
+
+      return (
+        <div>
+          <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16}}>
+            <div>
+              <h3 style={{margin: 0}}>Bill of Quantities</h3>
+              <p className="text-secondary" style={{fontSize: 13, margin: '4px 0 0'}}>{items.length} items — Total: {formatCurrency(grandTotal)}</p>
+            </div>
+            <button className="btn btn-primary btn-sm" onClick={() => { setEditingId(null); setForm({ name: '', category: 'internal', quantity: '1', unit_type: 'days', unit_price: '', margin_percent: '', phase_id: '' }); setIsAddOpen(true); }}>
+              <i data-lucide="plus" style={{width: 14, height: 14}}></i> Add Item
+            </button>
+          </div>
+
+          {/* Category summary chips */}
+          {items.length > 0 && (
+            <div style={{display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap'}}>
+              {Object.entries(catTotals).filter(([,v]) => v > 0).map(([cat, total]) => (
+                <div key={cat} style={{padding: '6px 12px', borderRadius: 8, fontSize: 13, fontWeight: 500, background: cat === 'internal' ? 'rgba(94,86,222,0.1)' : cat === 'external' ? 'rgba(228,106,23,0.1)' : cat === 'tools' ? 'rgba(222,247,99,0.2)' : 'rgba(156,163,175,0.1)'}}>
+                  {cat.charAt(0).toUpperCase() + cat.slice(1)}: {formatCurrency(total)}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {items.length === 0 ? (
+            <div style={{textAlign: 'center', padding: 32, color: 'var(--gray-text)'}}>
+              <i data-lucide="clipboard-list" style={{width: 40, height: 40, marginBottom: 12}}></i>
+              <p>No BOQ items yet. Add items to build your Bill of Quantities.</p>
+            </div>
+          ) : (
+            <div style={{overflowX: 'auto'}}>
+              <table>
+                <thead>
+                  <tr>
+                    <th style={{width: 40}}>#</th>
+                    <th>Item / Deliverable</th>
+                    <th>Category</th>
+                    <th>Phase</th>
+                    <th style={{textAlign: 'right'}}>Qty</th>
+                    <th>Unit</th>
+                    <th style={{textAlign: 'right'}}>Unit Price</th>
+                    <th style={{textAlign: 'right'}}>Margin %</th>
+                    <th style={{textAlign: 'right'}}>Total</th>
+                    <th style={{width: 60}}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((item, idx) => {
+                    const phase = phases.find(p => p.id === item.phase_id);
+                    const { baseTotal, margin, total } = db.calcBoqItemTotal(item, projectMargin, phase?.margin_percent);
+                    return (
+                      <tr key={item.id}>
+                        <td style={{color: 'var(--gray-text)'}}>{idx + 1}</td>
+                        <td style={{fontWeight: 500}}>{item.name}</td>
+                        <td>{getCategoryBadge(item.category)}</td>
+                        <td className="text-secondary" style={{fontSize: 13}}>{phase?.name || '—'}</td>
+                        <td style={{textAlign: 'right'}}>{item.quantity}</td>
+                        <td className="text-secondary">{item.unit_type}</td>
+                        <td style={{textAlign: 'right'}}>{formatCurrency(item.unit_price)}</td>
+                        <td style={{textAlign: 'right'}}>
+                          <span style={{color: getMarginColor(margin), fontWeight: 500}}>{margin.toFixed(1)}%</span>
+                          {item.margin_percent !== null && item.margin_percent !== undefined && (
+                            <span style={{fontSize: 10, marginLeft: 4, color: 'var(--boud-purple)'}}>*</span>
+                          )}
+                        </td>
+                        <td style={{textAlign: 'right', fontWeight: 600}}>{formatCurrency(total)}</td>
+                        <td>
+                          <div className="actions">
+                            <button className="btn btn-icon btn-sm" onClick={() => handleEdit(item)} title="Edit"><i data-lucide="edit-2" style={{width: 14, height: 14}}></i></button>
+                            <button className="btn btn-icon btn-sm" onClick={() => handleDelete(item.id)} style={{color: 'var(--error)'}} title="Delete"><i data-lucide="trash-2" style={{width: 14, height: 14}}></i></button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  <tr style={{fontWeight: 600, background: 'var(--boud-light-gray)'}}>
+                    <td colSpan={8} style={{textAlign: 'right'}}>Grand Total</td>
+                    <td style={{textAlign: 'right', color: 'var(--boud-purple)', fontSize: 16}}>{formatCurrency(grandTotal)}</td>
+                    <td></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Add/Edit BOQ Item Modal */}
+          {isAddOpen && (
+            <div className="modal-overlay" onClick={() => setIsAddOpen(false)}>
+              <div className="modal" style={{maxWidth: 550}} onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                  <h3>{editingId ? 'Edit BOQ Item' : 'Add BOQ Item'}</h3>
+                  <button className="btn btn-icon" onClick={() => setIsAddOpen(false)}><i data-lucide="x" style={{width: 20, height: 20}}></i></button>
+                </div>
+                <div className="modal-body">
+                  <div className="form-group">
+                    <label className="form-label">Item / Deliverable Name *</label>
+                    <input type="text" className="form-input" value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder="e.g., UX Research, API Development" />
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label className="form-label">Category</label>
+                      <select className="form-select" value={form.category} onChange={e => setForm({...form, category: e.target.value})}>
+                        {CATEGORIES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Phase (optional)</label>
+                      <select className="form-select" value={form.phase_id} onChange={e => setForm({...form, phase_id: e.target.value})}>
+                        <option value="">No phase</option>
+                        {phases.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label className="form-label">Quantity</label>
+                      <input type="number" className="form-input" value={form.quantity} onChange={e => setForm({...form, quantity: e.target.value})} min="0" step="0.5" />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Unit Type</label>
+                      <select className="form-select" value={form.unit_type} onChange={e => setForm({...form, unit_type: e.target.value})}>
+                        {UNIT_TYPES.map(u => <option key={u} value={u}>{u}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label className="form-label">Unit Price (SAR)</label>
+                      <input type="number" className="form-input" value={form.unit_price} onChange={e => setForm({...form, unit_price: e.target.value})} min="0" step="0.01" />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Margin % Override <span style={{fontSize: 11, color: 'var(--gray-text)'}}>(blank = inherit)</span></label>
+                      <input type="number" className="form-input" value={form.margin_percent} onChange={e => setForm({...form, margin_percent: e.target.value})} placeholder="Inherit from project" step="1" />
+                    </div>
+                  </div>
+                </div>
+                <div className="modal-footer">
+                  <button className="btn btn-secondary" onClick={() => setIsAddOpen(false)}>Cancel</button>
+                  <button className="btn btn-primary" onClick={handleSave} disabled={!form.name}>{editingId ? 'Update' : 'Add Item'}</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
     // Version History Component
     const VersionHistory = ({ projectId, onClose }) => {
       const [history, setHistory] = React.useState([]);
@@ -1623,12 +2020,13 @@
       const [expandedPhases, setExpandedPhases] = React.useState({});
       const [isHistoryOpen, setIsHistoryOpen] = React.useState(false);
       const [isRiskDiscountOpen, setIsRiskDiscountOpen] = React.useState(false);
+      const [activeTab, setActiveTab] = React.useState('resources');
       const [isPhaseModalOpen, setIsPhaseModalOpen] = React.useState(false);
       const [isResourceModalOpen, setIsResourceModalOpen] = React.useState(false);
       const [currentPhaseId, setCurrentPhaseId] = React.useState(null);
       const [editingItem, setEditingItem] = React.useState(null);
-      const [phaseForm, setPhaseForm] = React.useState({ name: '' });
-      const [resourceForm, setResourceForm] = React.useState({ role_id: '', hours: '', rate_override: '', notes: '' });
+      const [phaseForm, setPhaseForm] = React.useState({ name: '', margin_percent: '' });
+      const [resourceForm, setResourceForm] = React.useState({ role_id: '', days: '', daily_rate_override: '', notes: '' });
 
       const loadData = React.useCallback(() => {
         const p = db.getProject(projectId);
@@ -1651,15 +2049,20 @@
       React.useEffect(() => { loadData(); }, [loadData]);
 
       const handleSavePhase = () => {
-        if (editingItem) db.updatePhase(editingItem.id, phaseForm.name);
-        else db.createPhase(projectId, phaseForm.name);
+        const marginVal = phaseForm.margin_percent === '' ? null : parseFloat(phaseForm.margin_percent);
+        if (editingItem) {
+          db.updatePhase(editingItem.id, { name: phaseForm.name, margin_percent: marginVal });
+        } else {
+          const id = db.createPhase(projectId, phaseForm.name);
+          if (marginVal !== null) db.updatePhase(id, { margin_percent: marginVal });
+        }
         setIsPhaseModalOpen(false);
         loadData();
       };
 
       const handleSaveResource = () => {
-        if (editingItem) db.updateResourceCost(editingItem.id, parseFloat(resourceForm.hours), resourceForm.rate_override ? parseFloat(resourceForm.rate_override) : null, resourceForm.notes);
-        else db.addResourceCost(currentPhaseId, resourceForm.role_id, parseFloat(resourceForm.hours), resourceForm.rate_override ? parseFloat(resourceForm.rate_override) : null, resourceForm.notes);
+        if (editingItem) db.updateResourceCost(editingItem.id, parseFloat(resourceForm.days), resourceForm.daily_rate_override ? parseFloat(resourceForm.daily_rate_override) : null, resourceForm.notes);
+        else db.addResourceCost(currentPhaseId, resourceForm.role_id, parseFloat(resourceForm.days), resourceForm.daily_rate_override ? parseFloat(resourceForm.daily_rate_override) : null, resourceForm.notes);
         setIsResourceModalOpen(false);
         loadData();
       };
@@ -1765,34 +2168,76 @@
               <div className="label">Margin</div>
               <div className="value" style={{color: totals.actualMargin >= 25 ? 'var(--success)' : totals.actualMargin >= 15 ? 'var(--warning)' : 'var(--error)'}}>{totals.actualMargin.toFixed(1)}%</div>
             </div>
+            {totals.totalBoqValue > 0 && (
+              <>
+                <div className="margin-divider"></div>
+                <div className="margin-item">
+                  <div className="label">BOQ Value ({totals.boqItemCount} items)</div>
+                  <div className="value" style={{color: 'var(--boud-purple)'}}>{formatCurrency(totals.totalBoqValue)}</div>
+                </div>
+              </>
+            )}
           </div>
 
           {/* Action Buttons */}
-          <div style={{display: 'flex', gap: 8, marginBottom: 24}}>
+          <div style={{display: 'flex', gap: 8, marginBottom: 16}}>
             <button className="btn btn-purple" onClick={() => setIsRiskDiscountOpen(true)}>
               <i data-lucide="sliders" style={{width: 16, height: 16}}></i> Risk & Discount
             </button>
-            <button className="btn btn-secondary" onClick={() => { setPhaseForm({ name: '' }); setEditingItem(null); setIsPhaseModalOpen(true); }}>
+            <button className="btn btn-secondary" onClick={() => { setPhaseForm({ name: '', margin_percent: '' }); setEditingItem(null); setIsPhaseModalOpen(true); }}>
               <i data-lucide="plus" style={{width: 16, height: 16}}></i> Add Phase
             </button>
           </div>
 
-          {/* Phases */}
-          {phases.map(phase => (
+          {/* View Tabs */}
+          <div className="tabs" style={{marginBottom: 20}}>
+            <button className={`tab ${activeTab === 'resources' ? 'active' : ''}`} onClick={() => setActiveTab('resources')}>Resources & Costs</button>
+            <button className={`tab ${activeTab === 'boq' ? 'active' : ''}`} onClick={() => setActiveTab('boq')}>
+              BOQ {totals.boqItemCount > 0 && <span className="badge badge-purple" style={{marginLeft: 6, fontSize: 11}}>{totals.boqItemCount}</span>}
+            </button>
+          </div>
+
+          {/* BOQ Tab */}
+          {activeTab === 'boq' && (
+            <div className="card" style={{marginBottom: 24}}>
+              <BOQTable projectId={projectId} projectMargin={project.target_margin || 0} />
+            </div>
+          )}
+
+          {/* Resources Tab - Phases */}
+          {activeTab === 'resources' && phases.map(phase => (
             <div key={phase.id} className="phase-section">
               <div className="phase-header" onClick={() => setExpandedPhases(prev => ({...prev, [phase.id]: !prev[phase.id]}))}>
                 <h3 style={{display: 'flex', alignItems: 'center', gap: 8}}>
                   <i data-lucide={expandedPhases[phase.id] ? 'chevron-down' : 'chevron-right'} style={{width: 16, height: 16}}></i>
                   {phase.name}
+                  {phase.margin_percent !== null && phase.margin_percent !== undefined && (
+                    <span className={`badge ${phase.margin_percent > 30 ? 'badge-green' : phase.margin_percent > 10 ? 'badge-yellow' : phase.margin_percent > 0 ? 'badge-purple' : 'badge-red'}`} style={{fontSize: 11, marginLeft: 4}}>
+                      {phase.margin_percent}% margin
+                    </span>
+                  )}
                 </h3>
-                <div className="phase-total">{formatCurrency(phase.resources.reduce((s, r) => s + r.total, 0) + phase.tools.reduce((s, t) => s + t.total, 0) + phase.vendors.reduce((s, v) => s + v.cost, 0))}</div>
+                <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
+                  <div style={{display: 'flex', alignItems: 'center', gap: 4}} onClick={e => e.stopPropagation()}>
+                    <label style={{fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'nowrap'}}>Margin%</label>
+                    <input type="number" className="form-input" style={{width: 70, padding: '2px 6px', fontSize: 12, textAlign: 'center'}}
+                      value={phase.margin_percent ?? ''} placeholder="—"
+                      onChange={e => {
+                        const val = e.target.value === '' ? null : parseFloat(e.target.value);
+                        db.updatePhase(phase.id, { margin_percent: val });
+                        loadData();
+                      }}
+                    />
+                  </div>
+                  <div className="phase-total">{formatCurrency(phase.resources.reduce((s, r) => s + r.total, 0) + phase.tools.reduce((s, t) => s + t.total, 0) + phase.vendors.reduce((s, v) => s + v.cost, 0))}</div>
+                </div>
               </div>
               {expandedPhases[phase.id] && (
                 <div className="phase-content">
                   <div style={{marginBottom: 16}}>
                     <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8}}>
                       <h4>Resources</h4>
-                      <button className="btn btn-sm btn-secondary" onClick={() => { setCurrentPhaseId(phase.id); setResourceForm({ role_id: '', hours: '', rate_override: '', notes: '' }); setEditingItem(null); setIsResourceModalOpen(true); }}>
+                      <button className="btn btn-sm btn-secondary" onClick={() => { setCurrentPhaseId(phase.id); setResourceForm({ role_id: '', days: '', daily_rate_override: '', notes: '' }); setEditingItem(null); setIsResourceModalOpen(true); }}>
                         <i data-lucide="plus" style={{width: 14, height: 14}}></i> Add
                       </button>
                     </div>
@@ -1800,13 +2245,13 @@
                       <p className="text-secondary" style={{fontSize: 13}}>No resources added yet</p>
                     ) : (
                       <table>
-                        <thead><tr><th>Role</th><th>Hours</th><th>Rate</th><th>Total</th><th></th></tr></thead>
+                        <thead><tr><th>Role</th><th>Days</th><th>Daily Rate</th><th>Total</th><th></th></tr></thead>
                         <tbody>
                           {phase.resources.map(r => (
                             <tr key={r.id}>
                               <td>{r.role_name}</td>
-                              <td>{r.hours}h</td>
-                              <td>{formatCurrency(r.effective_rate)}/hr</td>
+                              <td>{r.days}d</td>
+                              <td>{formatCurrency(r.effective_daily_rate)}/day</td>
                               <td style={{fontWeight: 600}}>{formatCurrency(r.total)}</td>
                               <td>
                                 <button className="btn btn-icon btn-sm" onClick={() => db.deleteResourceCost(r.id) || loadData()} style={{color: 'var(--error)'}}><i data-lucide="trash-2" style={{width: 14, height: 14}}></i></button>
@@ -1823,6 +2268,7 @@
           ))}
 
           {/* Modals */}
+          {/* Note: modals render outside tab content */}
           {isHistoryOpen && <VersionHistory projectId={projectId} onClose={() => setIsHistoryOpen(false)} />}
           {isRiskDiscountOpen && <RiskDiscountModal project={project} onSave={handleSaveRiskDiscount} onClose={() => setIsRiskDiscountOpen(false)} />}
 
@@ -1831,7 +2277,8 @@
               <div className="modal" onClick={e => e.stopPropagation()}>
                 <div className="modal-header"><h3>{editingItem ? 'Edit Phase' : 'Add Phase'}</h3><button className="btn btn-icon" onClick={() => setIsPhaseModalOpen(false)}><i data-lucide="x" style={{width: 20, height: 20}}></i></button></div>
                 <div className="modal-body">
-                  <div className="form-group"><label className="form-label">Phase Name</label><input type="text" className="form-input" value={phaseForm.name} onChange={e => setPhaseForm({name: e.target.value})} placeholder="e.g., Discovery, Development" /></div>
+                  <div className="form-group"><label className="form-label">Phase Name</label><input type="text" className="form-input" value={phaseForm.name} onChange={e => setPhaseForm(prev => ({...prev, name: e.target.value}))} placeholder="e.g., Discovery, Development" /></div>
+                  <div className="form-group"><label className="form-label">Phase Margin % <span style={{color: 'var(--text-secondary)', fontWeight: 400}}>(optional — overrides project margin for this phase)</span></label><input type="number" className="form-input" value={phaseForm.margin_percent} onChange={e => setPhaseForm(prev => ({...prev, margin_percent: e.target.value}))} placeholder="Leave empty to use project margin" /></div>
                 </div>
                 <div className="modal-footer"><button className="btn btn-secondary" onClick={() => setIsPhaseModalOpen(false)}>Cancel</button><button className="btn btn-primary" onClick={handleSavePhase}>Save</button></div>
               </div>
@@ -1848,8 +2295,8 @@
                     <RoleSelector roles={roles} value={resourceForm.role_id} onChange={id => setResourceForm({...resourceForm, role_id: id})} formatCurrency={formatCurrency} />
                   </div>
                   <div className="form-row">
-                    <div className="form-group"><label className="form-label">Hours</label><input type="number" className="form-input" value={resourceForm.hours} onChange={e => setResourceForm({...resourceForm, hours: e.target.value})} min="0" /></div>
-                    <div className="form-group"><label className="form-label">Rate Override (optional)</label><input type="number" className="form-input" value={resourceForm.rate_override} onChange={e => setResourceForm({...resourceForm, rate_override: e.target.value})} placeholder="Use default" /></div>
+                    <div className="form-group"><label className="form-label">Days (1 day = 5 hours)</label><input type="number" className="form-input" value={resourceForm.days} onChange={e => setResourceForm({...resourceForm, days: e.target.value})} min="0" step="0.5" /></div>
+                    <div className="form-group"><label className="form-label">Daily Rate Override (optional)</label><input type="number" className="form-input" value={resourceForm.daily_rate_override} onChange={e => setResourceForm({...resourceForm, daily_rate_override: e.target.value})} placeholder="Use default" /></div>
                   </div>
                 </div>
                 <div className="modal-footer"><button className="btn btn-secondary" onClick={() => setIsResourceModalOpen(false)}>Cancel</button><button className="btn btn-primary" onClick={handleSaveResource}>Add</button></div>
@@ -1960,7 +2407,7 @@
       const [isImportModalOpen, setIsImportModalOpen] = React.useState(false);
       const [importPreview, setImportPreview] = React.useState([]);
       const [editingRole, setEditingRole] = React.useState(null);
-      const [formData, setFormData] = React.useState({ name: '', hourly_rate: '', department: '' });
+      const [formData, setFormData] = React.useState({ name: '', daily_rate: '', department: '' });
       const [filterDept, setFilterDept] = React.useState('all');
       const [isDragging, setIsDragging] = React.useState(false);
       const [selectedRoles, setSelectedRoles] = React.useState([]);
@@ -2015,9 +2462,9 @@
       const handleSubmit = (e) => {
         e.preventDefault();
         if (editingRole) {
-          db.updateRole(editingRole.id, formData.name, parseFloat(formData.hourly_rate), formData.department);
+          db.updateRole(editingRole.id, formData.name, parseFloat(formData.daily_rate), formData.department);
         } else {
-          db.createRole(formData.name, parseFloat(formData.hourly_rate), formData.department);
+          db.createRole(formData.name, parseFloat(formData.daily_rate), formData.department);
         }
         setRoles(db.getRoles());
         setIsModalOpen(false);
@@ -2037,7 +2484,8 @@
           for (let i = 1; i < lines.length; i++) {
             const cols = lines[i].split(',').map(c => c.trim().replace(/"/g, ''));
             if (cols.length >= 2 && cols[0] && !isNaN(parseFloat(cols[1]))) {
-              preview.push({ name: cols[0], hourly_rate: parseFloat(cols[1]), department: cols[2] || '' });
+              const rate = parseFloat(cols[1]);
+              preview.push({ name: cols[0], daily_rate: rate, hourly_rate: Math.round((rate / 5) * 100) / 100, department: cols[2] || '' });
             }
           }
           if (preview.length > 0) {
@@ -2066,7 +2514,7 @@
       const handleDragLeave = (e) => { e.preventDefault(); setIsDragging(false); };
 
       const confirmImport = () => {
-        importPreview.forEach(role => db.createRole(role.name, role.hourly_rate, role.department));
+        importPreview.forEach(role => db.createRole(role.name, role.daily_rate, role.department));
         setRoles(db.getRoles());
         setIsImportModalOpen(false);
         setImportPreview([]);
@@ -2074,7 +2522,7 @@
       };
 
       const downloadTemplate = () => {
-        const csv = 'Role Name,Hourly Rate,Department\n' + DEFAULT_ROLES.map(r => `"${r.name}",${r.hourly_rate},${r.department}`).join('\n');
+        const csv = 'Role Name,Daily Rate,Department\n' + DEFAULT_ROLES.map(r => `"${r.name}",${r.hourly_rate * 5},${r.department}`).join('\n');
         const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
@@ -2084,7 +2532,7 @@
 
       const loadDefaultRoles = () => {
         if (confirm(`This will add ${DEFAULT_ROLES.length} default roles to your list. Continue?`)) {
-          DEFAULT_ROLES.forEach(role => db.createRole(role.name, role.hourly_rate, role.department));
+          DEFAULT_ROLES.forEach(role => db.createRole(role.name, role.hourly_rate * 5, role.department));
           setRoles(db.getRoles());
           onRefresh?.();
         }
@@ -2093,12 +2541,12 @@
       return (
         <div>
           <div className="page-header">
-            <div><h1 className="page-title">Role Rates</h1><p className="text-secondary">Manage hourly rates for each role ({roles.length} roles)</p></div>
+            <div><h1 className="page-title">Role Rates</h1><p className="text-secondary">Manage daily rates for each role ({roles.length} roles) — 1 day = 5 hours</p></div>
             <div style={{display: 'flex', gap: 8}}>
               <button className="btn btn-secondary" onClick={loadDefaultRoles}>
                 <i data-lucide="database" style={{width: 16, height: 16}}></i> Load Defaults (89)
               </button>
-              <button className="btn btn-primary" onClick={() => { setEditingRole(null); setFormData({ name: '', hourly_rate: '', department: '' }); setIsModalOpen(true); }}>
+              <button className="btn btn-primary" onClick={() => { setEditingRole(null); setFormData({ name: '', daily_rate: '', department: '' }); setIsModalOpen(true); }}>
                 <i data-lucide="plus" style={{width: 18, height: 18}}></i> Add Role
               </button>
             </div>
@@ -2121,7 +2569,7 @@
             <input type="file" ref={fileInputRef} accept=".csv" onChange={handleFileUpload} style={{display: 'none'}} />
             <i data-lucide="upload-cloud" style={{width: 40, height: 40, color: 'var(--boud-purple)', marginBottom: 12}}></i>
             <p style={{fontWeight: 600, margin: '0 0 4px 0'}}>Drag & drop CSV file here, or click to browse</p>
-            <p className="text-secondary" style={{fontSize: 13, margin: 0}}>CSV format: Role Name, Hourly Rate, Department</p>
+            <p className="text-secondary" style={{fontSize: 13, margin: 0}}>CSV format: Role Name, Daily Rate, Department</p>
             <div style={{marginTop: 16, display: 'flex', gap: 12, justifyContent: 'center'}}>
               <button className="btn btn-sm btn-secondary" onClick={(e) => { e.stopPropagation(); downloadTemplate(); }}>
                 <i data-lucide="download" style={{width: 14, height: 14}}></i> Download Template (89 roles)
@@ -2136,11 +2584,11 @@
             </h4>
             <div style={{background: '#1e1e1e', color: '#def763', padding: 16, borderRadius: 8, fontFamily: 'monospace', fontSize: 13, overflowX: 'auto'}}>
               <div style={{color: '#888'}}>// Header row (required)</div>
-              <div>Role Name,Hourly Rate,Department</div>
-              <div style={{color: '#888', marginTop: 8}}>// Data rows</div>
-              <div>Senior Consultant - PM,560,PM</div>
-              <div>Consultant - BA,300,BA</div>
-              <div>Specialist - FE,80,FE</div>
+              <div>Role Name,Daily Rate,Department</div>
+              <div style={{color: '#888', marginTop: 8}}>// Data rows (1 day = 5 hours)</div>
+              <div>Senior Consultant - PM,2800,PM</div>
+              <div>Consultant - BA,1500,BA</div>
+              <div>Specialist - FE,400,FE</div>
             </div>
           </div>
 
@@ -2197,7 +2645,7 @@
                   </th>
                   <th>Role Name</th>
                   <th>Department</th>
-                  <th>Hourly Rate</th>
+                  <th>Daily Rate</th>
                   <th>Status</th>
                   <th>Actions</th>
                 </tr>
@@ -2217,7 +2665,7 @@
                     </td>
                     <td style={{fontWeight: 500}}>{role.name}</td>
                     <td><span className="badge badge-info" style={{background: 'rgba(94, 86, 222, 0.15)', color: 'var(--boud-purple)'}}>{role.department || '-'}</span></td>
-                    <td style={{color: 'var(--boud-purple)', fontWeight: 600}}>{formatCurrency(role.hourly_rate)}/hr</td>
+                    <td style={{color: 'var(--boud-purple)', fontWeight: 600}}>{formatCurrency(role.daily_rate || role.hourly_rate * 5)}/day <span style={{fontSize: 11, color: 'var(--gray-text)'}}>({formatCurrency(role.hourly_rate)}/hr)</span></td>
                     <td>
                       {role.status === 'inactive' && <span className="badge" style={{background: 'rgba(251, 191, 36, 0.2)', color: '#b45309'}}>Inactive</span>}
                       {role.status === 'hidden' && <span className="badge" style={{background: 'rgba(156, 163, 175, 0.2)', color: '#6b7280'}}>Hidden</span>}
@@ -2225,7 +2673,7 @@
                     </td>
                     <td>
                       <div className="actions">
-                        <button className="btn btn-icon btn-sm" onClick={() => { setEditingRole(role); setFormData({ name: role.name, hourly_rate: role.hourly_rate.toString(), department: role.department || '' }); setIsModalOpen(true); }} title="Edit"><i data-lucide="edit-2" style={{width: 16, height: 16}}></i></button>
+                        <button className="btn btn-icon btn-sm" onClick={() => { setEditingRole(role); setFormData({ name: role.name, daily_rate: (role.daily_rate || role.hourly_rate * 5).toString(), department: role.department || '' }); setIsModalOpen(true); }} title="Edit"><i data-lucide="edit-2" style={{width: 16, height: 16}}></i></button>
                         <button className="btn btn-icon btn-sm" onClick={() => toggleRoleStatus(role.id, role.status === 'inactive' ? 'active' : 'inactive')} title={role.status === 'inactive' ? 'Activate' : 'Deactivate'}>
                           <i data-lucide={role.status === 'inactive' ? 'play-circle' : 'pause-circle'} style={{width: 16, height: 16, color: role.status === 'inactive' ? 'var(--success)' : 'var(--warning)'}}></i>
                         </button>
@@ -2250,7 +2698,7 @@
                   <div className="modal-body">
                     <div className="form-group"><label className="form-label">Role Name</label><input type="text" className="form-input" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} required placeholder="e.g. Senior Consultant - PM" /></div>
                     <div className="form-row">
-                      <div className="form-group"><label className="form-label">Hourly Rate (SAR)</label><input type="number" step="0.01" className="form-input" value={formData.hourly_rate} onChange={e => setFormData({...formData, hourly_rate: e.target.value})} required /></div>
+                      <div className="form-group"><label className="form-label">Daily Rate (SAR) — 1 day = 5 hrs</label><input type="number" step="0.01" className="form-input" value={formData.daily_rate} onChange={e => setFormData({...formData, daily_rate: e.target.value})} required /></div>
                       <div className="form-group"><label className="form-label">Department</label>
                         <select className="form-select" value={formData.department} onChange={e => setFormData({...formData, department: e.target.value})}>
                           <option value="">Select...</option>
@@ -2280,13 +2728,13 @@
                   </div>
                   <div style={{maxHeight: 300, overflowY: 'auto'}}>
                     <table style={{fontSize: 13}}>
-                      <thead><tr><th>Role Name</th><th>Department</th><th>Hourly Rate</th></tr></thead>
+                      <thead><tr><th>Role Name</th><th>Department</th><th>Daily Rate</th></tr></thead>
                       <tbody>
                         {importPreview.slice(0, 20).map((role, i) => (
                           <tr key={i}>
                             <td>{role.name}</td>
                             <td>{role.department || '-'}</td>
-                            <td>{formatCurrency(role.hourly_rate)}/hr</td>
+                            <td>{formatCurrency(role.daily_rate || role.hourly_rate * 5)}/day</td>
                           </tr>
                         ))}
                         {importPreview.length > 20 && <tr><td colSpan={3} className="text-secondary" style={{textAlign: 'center'}}>...and {importPreview.length - 20} more</td></tr>}
