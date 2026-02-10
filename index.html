@@ -234,7 +234,32 @@
     const generateId = (prefix = '') => prefix + '_' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
 
     // Schema version for data migrations
-    const SCHEMA_VERSION = 3;
+    const SCHEMA_VERSION = 4;
+
+    // Permission definitions
+    const PERMISSIONS = {
+      pricing_edit: 'Edit pricing & rates',
+      pricing_view: 'View pricing & rates',
+      boq_edit: 'Edit BOQ items',
+      boq_view: 'View BOQ',
+      approve: 'Approve projects',
+      create_cr: 'Create change requests',
+      view_audit: 'View audit log',
+      manage_users: 'Manage users',
+      manage_credits: 'Manage credits & packages',
+      export: 'Export proposals & CSV',
+      manage_templates: 'Manage templates'
+    };
+
+    const ROLE_PRESETS = {
+      super_admin: { label: 'Super Admin', permissions: Object.keys(PERMISSIONS).reduce((acc, k) => ({...acc, [k]: true}), {}) },
+      admin: { label: 'Admin', permissions: { pricing_edit: true, pricing_view: true, boq_edit: true, boq_view: true, approve: true, create_cr: true, view_audit: true, manage_credits: true, export: true, manage_templates: true, manage_users: false } },
+      manager: { label: 'Manager', permissions: { pricing_view: true, boq_view: true, approve: true, create_cr: true, view_audit: true, export: true, pricing_edit: false, boq_edit: false, manage_users: false, manage_credits: false, manage_templates: false } },
+      bd_user: { label: 'BD User', permissions: { pricing_edit: true, pricing_view: true, boq_edit: true, boq_view: true, create_cr: true, export: true, approve: false, view_audit: false, manage_users: false, manage_credits: false, manage_templates: false } },
+      operator: { label: 'Operator', permissions: { pricing_view: true, boq_view: true, view_audit: true, pricing_edit: false, boq_edit: false, approve: false, create_cr: false, manage_users: false, manage_credits: false, export: false, manage_templates: false } },
+      finance: { label: 'Finance', permissions: { pricing_view: true, boq_view: true, view_audit: true, export: true, pricing_edit: false, boq_edit: false, approve: false, create_cr: false, manage_users: false, manage_credits: false, manage_templates: false } },
+      collections: { label: 'Collections', permissions: { pricing_view: true, boq_view: true, pricing_edit: false, boq_edit: false, approve: false, create_cr: false, view_audit: false, manage_users: false, manage_credits: false, export: false, manage_templates: false } }
+    };
 
     // Database state stored in memory (will use localStorage for persistence)
     let dbState = {
@@ -253,6 +278,8 @@
       creditDefinitions: [],
       clientAgreements: [],
       packages: [],
+      users: [],
+      currentUserId: null,
       templates: [],
       recentRoles: []
     };
@@ -357,6 +384,28 @@
         }
 
         state.schema_version = 3;
+      }
+
+      if (version < 4) {
+        if (!state.users) state.users = [];
+        if (!state.currentUserId) state.currentUserId = null;
+
+        // Create default Super Admin user
+        if (state.users.length === 0) {
+          const adminUser = {
+            id: 'user_admin',
+            name: 'Admin',
+            email: 'admin@boud.sa',
+            role: 'super_admin',
+            permissions: { ...ROLE_PRESETS.super_admin.permissions },
+            is_active: true,
+            created_at: new Date().toISOString()
+          };
+          state.users.push(adminUser);
+          state.currentUserId = 'user_admin';
+        }
+
+        state.schema_version = 4;
       }
 
       return state;
@@ -948,6 +997,38 @@
         addVersionHistory(projectId, 'package_applied', `Package "${pkg.name}" applied`);
       },
 
+      // --- User & Access Control ---
+      getUsers: () => (dbState.users || []).filter(u => u.is_active),
+      getAllUsers: () => dbState.users || [],
+      getUser: (id) => (dbState.users || []).find(u => u.id === id),
+      getCurrentUser: () => (dbState.users || []).find(u => u.id === dbState.currentUserId),
+      setCurrentUser: (id) => { dbState.currentUserId = id; saveState(); },
+      hasPermission: (permission) => {
+        const user = (dbState.users || []).find(u => u.id === dbState.currentUserId);
+        if (!user) return true; // If no user system, allow everything
+        return user.permissions?.[permission] === true;
+      },
+      addUser: (data) => {
+        const id = generateId('user');
+        const rolePreset = ROLE_PRESETS[data.role] || ROLE_PRESETS.operator;
+        dbState.users.push({
+          id, ...data,
+          permissions: data.permissions || { ...rolePreset.permissions },
+          is_active: true,
+          created_at: new Date().toISOString()
+        });
+        saveState();
+        return id;
+      },
+      updateUser: (id, data) => {
+        const idx = (dbState.users || []).findIndex(u => u.id === id);
+        if (idx !== -1) { Object.assign(dbState.users[idx], data); saveState(); }
+      },
+      deactivateUser: (id) => {
+        const idx = (dbState.users || []).findIndex(u => u.id === id);
+        if (idx !== -1) { dbState.users[idx].is_active = false; saveState(); }
+      },
+
       calculateProjectTotals: (projectId) => {
         const phases = db.getPhases(projectId);
         const project = db.getProject(projectId);
@@ -1412,20 +1493,22 @@
     const Sidebar = ({ currentView, onNavigate, theme, onToggleTheme, onOpenNotifications, notificationCount, onLogout }) => {
       const [pricingExpanded, setPricingExpanded] = React.useState(['rates', 'tools', 'api-settings', 'product-fees'].includes(currentView));
 
-      const mainNavItems = [
+      const allNavItems = [
         { id: 'dashboard', label: 'Dashboard', icon: 'layout-dashboard' },
         { id: 'insights', label: 'Insights', icon: 'bar-chart-3' },
         { id: 'projects', label: 'Projects', icon: 'folder-open' },
-        { id: 'credits', label: 'Credits & Packages', icon: 'coins' },
-        { id: 'templates', label: 'Templates', icon: 'file-stack' },
+        { id: 'credits', label: 'Credits & Packages', icon: 'coins', perm: 'manage_credits' },
+        { id: 'users', label: 'Users', icon: 'users-round', perm: 'manage_users' },
+        { id: 'templates', label: 'Templates', icon: 'file-stack', perm: 'manage_templates' },
       ];
+      const mainNavItems = allNavItems.filter(item => !item.perm || db.hasPermission(item.perm));
 
-      const pricingNavItems = [
+      const pricingNavItems = db.hasPermission('pricing_view') ? [
         { id: 'rates', label: 'Role Rates', icon: 'users' },
         { id: 'tools', label: 'Tools & Subscriptions', icon: 'wrench' },
         { id: 'api-settings', label: 'API Pricing', icon: 'zap' },
         { id: 'product-fees', label: 'Product Fees', icon: 'package' },
-      ];
+      ] : [];
 
       React.useEffect(() => { lucide.createIcons(); }, [currentView, pricingExpanded]);
 
@@ -1479,7 +1562,21 @@
             </ul>
           </nav>
 
-          <div style={{borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 16, marginTop: 16}}>
+          <div style={{borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 12, marginTop: 16}}>
+            {(() => {
+              const user = db.getCurrentUser();
+              return user ? (
+                <div style={{padding: '8px 12px', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8}}>
+                  <div style={{width: 28, height: 28, borderRadius: '50%', background: 'var(--boud-lime)', color: 'var(--boud-dark)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 12, flexShrink: 0}}>
+                    {user.name.charAt(0).toUpperCase()}
+                  </div>
+                  <div style={{overflow: 'hidden'}}>
+                    <div style={{color: 'white', fontSize: 13, fontWeight: 600, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap'}}>{user.name}</div>
+                    <div style={{color: 'rgba(255,255,255,0.5)', fontSize: 11}}>{ROLE_PRESETS[user.role]?.label || user.role}</div>
+                  </div>
+                </div>
+              ) : null;
+            })()}
             <button onClick={onLogout} className="btn" style={{width: '100%', background: 'rgba(255,255,255,0.1)', color: 'white', justifyContent: 'flex-start'}}>
               <i data-lucide="log-out" style={{width: 16, height: 16}}></i>
               <span>Sign Out</span>
@@ -3216,6 +3313,161 @@
       );
     };
 
+    // User Management
+    const UserManagement = ({ onRefresh }) => {
+      const [users, setUsers] = React.useState([]);
+      const [isModalOpen, setIsModalOpen] = React.useState(false);
+      const [editingUser, setEditingUser] = React.useState(null);
+      const [form, setForm] = React.useState({ name: '', email: '', role: 'bd_user' });
+      const currentUser = db.getCurrentUser();
+
+      const loadData = () => {
+        setUsers(db.getUsers());
+        setTimeout(() => lucide.createIcons(), 0);
+      };
+      React.useEffect(() => { loadData(); }, []);
+
+      if (!db.hasPermission('manage_users')) {
+        return <div className="card" style={{textAlign: 'center', padding: 40}}><p>You do not have permission to manage users.</p></div>;
+      }
+
+      const handleSave = () => {
+        const rolePreset = ROLE_PRESETS[form.role];
+        if (editingUser) {
+          db.updateUser(editingUser.id, { name: form.name, email: form.email, role: form.role, permissions: { ...rolePreset.permissions } });
+        } else {
+          db.addUser({ name: form.name, email: form.email, role: form.role });
+        }
+        setIsModalOpen(false); setEditingUser(null);
+        setForm({ name: '', email: '', role: 'bd_user' });
+        loadData();
+      };
+
+      const getRoleBadgeColor = (role) => {
+        const colors = { super_admin: 'badge-red', admin: 'badge-purple', manager: 'badge-yellow', bd_user: 'badge-green', operator: '', finance: 'badge-purple', collections: 'badge-yellow' };
+        return colors[role] || '';
+      };
+
+      return (
+        <div>
+          <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24}}>
+            <h1 className="page-title">User Management</h1>
+            <button className="btn btn-primary" onClick={() => { setEditingUser(null); setForm({ name: '', email: '', role: 'bd_user' }); setIsModalOpen(true); }}>
+              <i data-lucide="user-plus" style={{width: 16, height: 16}}></i> Add User
+            </button>
+          </div>
+
+          {/* Current user indicator */}
+          {currentUser && (
+            <div className="card" style={{marginBottom: 16, padding: 12, display: 'flex', alignItems: 'center', gap: 12, background: 'rgba(94,86,222,0.08)'}}>
+              <div style={{width: 36, height: 36, borderRadius: '50%', background: 'var(--boud-purple)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 14}}>
+                {currentUser.name.charAt(0).toUpperCase()}
+              </div>
+              <div style={{flex: 1}}>
+                <div style={{fontWeight: 600, fontSize: 14}}>Logged in as: {currentUser.name}</div>
+                <div style={{fontSize: 12, color: 'var(--text-secondary)'}}>{ROLE_PRESETS[currentUser.role]?.label || currentUser.role}</div>
+              </div>
+            </div>
+          )}
+
+          {/* User list */}
+          <div style={{display: 'grid', gap: 8}}>
+            {users.map(user => (
+              <div key={user.id} className="card" style={{padding: 14, display: 'flex', alignItems: 'center', gap: 12, border: user.id === dbState.currentUserId ? '2px solid var(--boud-purple)' : undefined}}>
+                <div style={{width: 40, height: 40, borderRadius: '50%', background: user.id === dbState.currentUserId ? 'var(--boud-purple)' : 'var(--bg-secondary)', color: user.id === dbState.currentUserId ? 'white' : 'var(--text-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 16}}>
+                  {user.name.charAt(0).toUpperCase()}
+                </div>
+                <div style={{flex: 1}}>
+                  <div style={{display: 'flex', alignItems: 'center', gap: 8}}>
+                    <span style={{fontWeight: 600}}>{user.name}</span>
+                    <span className={`badge ${getRoleBadgeColor(user.role)}`} style={{fontSize: 10}}>{ROLE_PRESETS[user.role]?.label || user.role}</span>
+                    {user.id === dbState.currentUserId && <span className="badge badge-green" style={{fontSize: 10}}>Current</span>}
+                  </div>
+                  <div style={{fontSize: 12, color: 'var(--text-secondary)'}}>{user.email}</div>
+                </div>
+                <div className="actions" style={{display: 'flex', gap: 4}}>
+                  {user.id !== dbState.currentUserId && (
+                    <button className="btn btn-sm btn-secondary" onClick={() => { db.setCurrentUser(user.id); loadData(); }}>
+                      Switch
+                    </button>
+                  )}
+                  <button className="btn btn-icon btn-sm" onClick={() => { setEditingUser(user); setForm({ name: user.name, email: user.email, role: user.role }); setIsModalOpen(true); }}>
+                    <i data-lucide="edit-2" style={{width: 14, height: 14}}></i>
+                  </button>
+                  {user.role !== 'super_admin' && (
+                    <button className="btn btn-icon btn-sm" onClick={() => { if (confirm(`Deactivate ${user.name}?`)) { db.deactivateUser(user.id); loadData(); } }} style={{color: 'var(--error)'}}>
+                      <i data-lucide="user-x" style={{width: 14, height: 14}}></i>
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Permission Matrix */}
+          {users.length > 0 && (
+            <div style={{marginTop: 24}}>
+              <h3 style={{marginBottom: 12}}>Permission Matrix</h3>
+              <div style={{overflowX: 'auto'}}>
+                <table style={{fontSize: 12}}>
+                  <thead>
+                    <tr>
+                      <th>User</th>
+                      {Object.entries(PERMISSIONS).map(([key, label]) => (
+                        <th key={key} style={{textAlign: 'center', fontSize: 10, padding: '8px 4px', maxWidth: 60, whiteSpace: 'normal'}}>{label}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {users.map(user => (
+                      <tr key={user.id}>
+                        <td style={{fontWeight: 500, whiteSpace: 'nowrap'}}>{user.name}</td>
+                        {Object.keys(PERMISSIONS).map(perm => (
+                          <td key={perm} style={{textAlign: 'center'}}>
+                            <input type="checkbox" checked={user.permissions?.[perm] || false}
+                              onChange={e => {
+                                const updated = { ...user.permissions, [perm]: e.target.checked };
+                                db.updateUser(user.id, { permissions: updated });
+                                loadData();
+                              }}
+                              disabled={user.role === 'super_admin'}
+                              style={{cursor: user.role === 'super_admin' ? 'not-allowed' : 'pointer'}}
+                            />
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Add/Edit User Modal */}
+          {isModalOpen && (
+            <div className="modal-overlay" onClick={() => setIsModalOpen(false)}>
+              <div className="modal" style={{maxWidth: 450}} onClick={e => e.stopPropagation()}>
+                <div className="modal-header"><h3>{editingUser ? 'Edit User' : 'Add User'}</h3><button className="btn btn-icon" onClick={() => setIsModalOpen(false)}><i data-lucide="x" style={{width: 20, height: 20}}></i></button></div>
+                <div className="modal-body">
+                  <div className="form-group"><label className="form-label">Name *</label><input type="text" className="form-input" value={form.name} onChange={e => setForm({...form, name: e.target.value})} /></div>
+                  <div className="form-group"><label className="form-label">Email *</label><input type="email" className="form-input" value={form.email} onChange={e => setForm({...form, email: e.target.value})} /></div>
+                  <div className="form-group">
+                    <label className="form-label">Role *</label>
+                    <select className="form-input" value={form.role} onChange={e => setForm({...form, role: e.target.value})}>
+                      {Object.entries(ROLE_PRESETS).map(([key, preset]) => (
+                        <option key={key} value={key}>{preset.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="modal-footer"><button className="btn btn-secondary" onClick={() => setIsModalOpen(false)}>Cancel</button><button className="btn btn-primary" disabled={!form.name || !form.email} onClick={handleSave}>Save</button></div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
     // Credits & Packages Management
     const CreditsAndPackages = ({ onRefresh }) => {
       const [activeTab, setActiveTab] = React.useState('definitions');
@@ -3761,6 +4013,7 @@
           case 'projects': return <ProjectsList onNavigate={handleNavigate} refreshKey={refreshKey} onRefresh={triggerRefresh} />;
           case 'project-pricing': return <ProjectPricing projectId={selectedProjectId} onBack={() => handleNavigate('projects')} onRefresh={triggerRefresh} onNavigate={handleNavigate} />;
           case 'credits': return <CreditsAndPackages onRefresh={triggerRefresh} />;
+          case 'users': return <UserManagement onRefresh={triggerRefresh} />;
           case 'templates': return <TemplatesLibrary onNavigate={handleNavigate} onRefresh={triggerRefresh} />;
           case 'settings': return <Settings onRefresh={triggerRefresh} />;
           default: return <Dashboard onNavigate={handleNavigate} refreshKey={refreshKey} />;
