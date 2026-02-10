@@ -722,11 +722,97 @@
       // Calculate BOQ item total with margin
       calcBoqItemTotal: (item, projectMargin, phaseMargin) => {
         const baseTotal = (item.quantity || 0) * (item.unit_price || 0);
-        // Margin cascade: line-item > phase > project
         const margin = item.margin_percent !== null && item.margin_percent !== undefined
           ? item.margin_percent
           : (phaseMargin !== null && phaseMargin !== undefined ? phaseMargin : (projectMargin || 0));
         return { baseTotal, margin, total: baseTotal * (1 + margin / 100) };
+      },
+
+      // --- Project Status State Machine ---
+      isEditable: (project) => {
+        return !project || project.status === 'draft' || !project.status;
+      },
+      submitForApproval: (projectId) => {
+        const project = db.getProject(projectId);
+        if (project && (project.status === 'draft' || !project.status)) {
+          db.updateProject(projectId, { status: 'pending_approval' });
+          addVersionHistory(projectId, 'status_change', 'Project submitted for approval');
+        }
+      },
+      approveProject: (projectId) => {
+        const project = db.getProject(projectId);
+        if (project && project.status === 'pending_approval') {
+          db.updateProject(projectId, { status: 'approved' });
+          addVersionHistory(projectId, 'status_change', 'Project approved');
+        }
+      },
+      revertToDraft: (projectId) => {
+        const project = db.getProject(projectId);
+        if (project && (project.status === 'pending_approval' || project.status === 'approved')) {
+          db.updateProject(projectId, { status: 'draft' });
+          addVersionHistory(projectId, 'status_change', `Project reverted to draft from ${project.status}`);
+        }
+      },
+
+      // --- Change Request System ---
+      getChangeRequests: (projectId) => {
+        return (dbState.changeRequests || []).filter(cr => cr.project_id === projectId).sort((a, b) => new Date(b.requested_at) - new Date(a.requested_at));
+      },
+      createChangeRequest: (projectId, fieldPath, oldValue, newValue, reason) => {
+        const id = generateId('cr');
+        const cr = {
+          id, project_id: projectId,
+          field_path: fieldPath,
+          old_value: oldValue, new_value: newValue,
+          reason: reason || '',
+          status: 'pending',
+          requested_by: 'User',
+          requested_at: new Date().toISOString(),
+          applied_at: null
+        };
+        dbState.changeRequests.push(cr);
+        addVersionHistory(projectId, 'cr_created', `Change request created: ${fieldPath} (${oldValue} → ${newValue})`);
+        saveState();
+        return id;
+      },
+      applyChangeRequest: (crId) => {
+        const idx = dbState.changeRequests.findIndex(cr => cr.id === crId);
+        if (idx === -1) return;
+        const cr = dbState.changeRequests[idx];
+        cr.status = 'applied';
+        cr.applied_at = new Date().toISOString();
+
+        // Apply the change based on field_path
+        const parts = cr.field_path.split('.');
+        if (parts[0] === 'project') {
+          const field = parts[1];
+          const project = db.getProject(cr.project_id);
+          if (project) {
+            const val = isNaN(cr.new_value) ? cr.new_value : parseFloat(cr.new_value);
+            db.updateProject(cr.project_id, { [field]: val }, false);
+          }
+        } else if (parts[0] === 'boqItems') {
+          const itemId = parts[1];
+          const field = parts[2];
+          const val = isNaN(cr.new_value) ? cr.new_value : parseFloat(cr.new_value);
+          db.updateBoqItem(itemId, { [field]: val });
+        } else if (parts[0] === 'phase') {
+          const phaseId = parts[1];
+          const field = parts[2];
+          const val = isNaN(cr.new_value) ? cr.new_value : parseFloat(cr.new_value);
+          db.updatePhase(phaseId, { [field]: val });
+        }
+
+        addVersionHistory(cr.project_id, 'cr_applied', `Change request applied: ${cr.field_path} set to ${cr.new_value}`);
+        saveState();
+      },
+      rejectChangeRequest: (crId) => {
+        const idx = dbState.changeRequests.findIndex(cr => cr.id === crId);
+        if (idx !== -1) {
+          dbState.changeRequests[idx].status = 'rejected';
+          addVersionHistory(dbState.changeRequests[idx].project_id, 'cr_rejected', `Change request rejected: ${dbState.changeRequests[idx].field_path}`);
+          saveState();
+        }
       },
 
       calculateProjectTotals: (projectId) => {
@@ -1658,7 +1744,7 @@
     // For brevity, I'll include the key new features and modified components
 
     // BOQ Table Component
-    const BOQTable = ({ projectId, projectMargin }) => {
+    const BOQTable = ({ projectId, projectMargin, editable = true, onCreateCr }) => {
       const [items, setItems] = React.useState([]);
       const [phases, setPhases] = React.useState([]);
       const [isAddOpen, setIsAddOpen] = React.useState(false);
@@ -1753,9 +1839,11 @@
               <h3 style={{margin: 0}}>Bill of Quantities</h3>
               <p className="text-secondary" style={{fontSize: 13, margin: '4px 0 0'}}>{items.length} items — Total: {formatCurrency(grandTotal)}</p>
             </div>
-            <button className="btn btn-primary btn-sm" onClick={() => { setEditingId(null); setForm({ name: '', category: 'internal', quantity: '1', unit_type: 'days', unit_price: '', margin_percent: '', phase_id: '' }); setIsAddOpen(true); }}>
-              <i data-lucide="plus" style={{width: 14, height: 14}}></i> Add Item
-            </button>
+            {editable && (
+              <button className="btn btn-primary btn-sm" onClick={() => { setEditingId(null); setForm({ name: '', category: 'internal', quantity: '1', unit_type: 'days', unit_price: '', margin_percent: '', phase_id: '' }); setIsAddOpen(true); }}>
+                <i data-lucide="plus" style={{width: 14, height: 14}}></i> Add Item
+              </button>
+            )}
           </div>
 
           {/* Category summary chips */}
@@ -1812,10 +1900,16 @@
                         </td>
                         <td style={{textAlign: 'right', fontWeight: 600}}>{formatCurrency(total)}</td>
                         <td>
-                          <div className="actions">
-                            <button className="btn btn-icon btn-sm" onClick={() => handleEdit(item)} title="Edit"><i data-lucide="edit-2" style={{width: 14, height: 14}}></i></button>
-                            <button className="btn btn-icon btn-sm" onClick={() => handleDelete(item.id)} style={{color: 'var(--error)'}} title="Delete"><i data-lucide="trash-2" style={{width: 14, height: 14}}></i></button>
-                          </div>
+                          {editable ? (
+                            <div className="actions">
+                              <button className="btn btn-icon btn-sm" onClick={() => handleEdit(item)} title="Edit"><i data-lucide="edit-2" style={{width: 14, height: 14}}></i></button>
+                              <button className="btn btn-icon btn-sm" onClick={() => handleDelete(item.id)} style={{color: 'var(--error)'}} title="Delete"><i data-lucide="trash-2" style={{width: 14, height: 14}}></i></button>
+                            </div>
+                          ) : onCreateCr ? (
+                            <button className="btn btn-icon btn-sm" onClick={() => onCreateCr(`boqItems.${item.id}.unit_price`, item.unit_price, `${item.name} unit price`)} title="Request Change" style={{color: 'var(--warning)'}}>
+                              <i data-lucide="git-pull-request" style={{width: 14, height: 14}}></i>
+                            </button>
+                          ) : null}
                         </td>
                       </tr>
                     );
@@ -1914,6 +2008,12 @@
           case 'risk_margin': return 'shield';
           case 'phase_added': return 'layers';
           case 'phase_deleted': return 'trash-2';
+          case 'status_change': return 'toggle-right';
+          case 'cr_created': return 'git-pull-request';
+          case 'cr_applied': return 'check-circle';
+          case 'cr_rejected': return 'x-circle';
+          case 'boq_added': return 'clipboard-list';
+          case 'boq_deleted': return 'clipboard-x';
           default: return 'edit';
         }
       };
@@ -2011,6 +2111,116 @@
       );
     };
 
+    // Change Request Modal
+    const ChangeRequestModal = ({ form, onUpdate, onSubmit, onClose }) => (
+      <div className="modal-overlay" onClick={onClose}>
+        <div className="modal" style={{maxWidth: 500}} onClick={e => e.stopPropagation()}>
+          <div className="modal-header">
+            <h3>Request Change</h3>
+            <button className="btn btn-icon" onClick={onClose}><i data-lucide="x" style={{width: 20, height: 20}}></i></button>
+          </div>
+          <div className="modal-body">
+            <p className="text-secondary" style={{fontSize: 13, marginBottom: 16}}>This project is locked. Submit a change request to modify this field.</p>
+            {form.label && <div className="form-group"><label className="form-label">Field</label><div style={{padding: '8px 12px', background: 'var(--bg-secondary)', borderRadius: 8, fontSize: 14}}>{form.label}</div></div>}
+            <div className="form-group"><label className="form-label">Current Value</label><div style={{padding: '8px 12px', background: 'var(--bg-secondary)', borderRadius: 8, fontSize: 14, fontFamily: 'monospace'}}>{form.old_value || '—'}</div></div>
+            <div className="form-group"><label className="form-label">New Value *</label><input type="text" className="form-input" value={form.new_value} onChange={e => onUpdate({...form, new_value: e.target.value})} placeholder="Enter new value" autoFocus /></div>
+            <div className="form-group"><label className="form-label">Reason for Change *</label><textarea className="form-input" rows={3} value={form.reason} onChange={e => onUpdate({...form, reason: e.target.value})} placeholder="Explain why this change is needed..." style={{resize: 'vertical'}}></textarea></div>
+          </div>
+          <div className="modal-footer">
+            <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+            <button className="btn btn-primary" disabled={!form.new_value || !form.reason} onClick={onSubmit}>
+              <i data-lucide="git-pull-request" style={{width: 16, height: 16}}></i> Submit Request
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+
+    // Change Request Panel (Side panel)
+    const ChangeRequestPanel = ({ projectId, changeRequests, onClose, onRefresh }) => {
+      const pending = changeRequests.filter(cr => cr.status === 'pending');
+      const applied = changeRequests.filter(cr => cr.status === 'applied');
+      const rejected = changeRequests.filter(cr => cr.status === 'rejected');
+
+      const handleApply = (crId) => {
+        db.applyChangeRequest(crId);
+        onRefresh();
+      };
+      const handleReject = (crId) => {
+        db.rejectChangeRequest(crId);
+        onRefresh();
+      };
+
+      const formatDate = (iso) => new Date(iso).toLocaleDateString('en-SA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+      const CrCard = ({ cr }) => (
+        <div style={{padding: 12, background: 'var(--bg-secondary)', borderRadius: 8, marginBottom: 8, borderLeft: `3px solid ${cr.status === 'pending' ? 'var(--warning)' : cr.status === 'applied' ? 'var(--success)' : 'var(--error)'}`}}>
+          <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6}}>
+            <span style={{fontSize: 13, fontWeight: 600, wordBreak: 'break-all'}}>{cr.field_path}</span>
+            <span className={`badge ${cr.status === 'pending' ? 'badge-yellow' : cr.status === 'applied' ? 'badge-green' : 'badge-red'}`} style={{fontSize: 10, flexShrink: 0}}>{cr.status}</span>
+          </div>
+          <div style={{fontSize: 12, marginBottom: 4}}>
+            <span className="text-secondary">From:</span> <code style={{fontSize: 11}}>{cr.old_value}</code> → <span style={{fontWeight: 500}}>{cr.new_value}</span>
+          </div>
+          <p style={{fontSize: 12, color: 'var(--text-secondary)', margin: '4px 0'}}>{cr.reason}</p>
+          <div style={{fontSize: 11, color: 'var(--gray-text)'}}>
+            {cr.requested_by} • {formatDate(cr.requested_at)}
+            {cr.applied_at && ` • Applied: ${formatDate(cr.applied_at)}`}
+          </div>
+          {cr.status === 'pending' && (
+            <div style={{display: 'flex', gap: 6, marginTop: 8}}>
+              <button className="btn btn-sm" style={{background: 'var(--success)', color: 'white', border: 'none', fontSize: 12}} onClick={() => handleApply(cr.id)}>
+                <i data-lucide="check" style={{width: 12, height: 12}}></i> Apply
+              </button>
+              <button className="btn btn-sm" style={{background: 'var(--error)', color: 'white', border: 'none', fontSize: 12}} onClick={() => handleReject(cr.id)}>
+                <i data-lucide="x" style={{width: 12, height: 12}}></i> Reject
+              </button>
+            </div>
+          )}
+        </div>
+      );
+
+      return (
+        <div className="modal-overlay" onClick={onClose}>
+          <div style={{position: 'fixed', top: 0, right: 0, bottom: 0, width: 420, maxWidth: '90vw', background: 'var(--bg-primary)', boxShadow: '-4px 0 24px rgba(0,0,0,0.3)', display: 'flex', flexDirection: 'column', zIndex: 1001}} onClick={e => e.stopPropagation()}>
+            <div style={{padding: '16px 20px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+              <h3 style={{margin: 0}}>Change Requests</h3>
+              <button className="btn btn-icon" onClick={onClose}><i data-lucide="x" style={{width: 20, height: 20}}></i></button>
+            </div>
+            <div style={{flex: 1, overflow: 'auto', padding: 20}}>
+              {changeRequests.length === 0 ? (
+                <div style={{textAlign: 'center', padding: 32, color: 'var(--gray-text)'}}>
+                  <i data-lucide="git-pull-request" style={{width: 40, height: 40, marginBottom: 12}}></i>
+                  <p>No change requests yet</p>
+                </div>
+              ) : (
+                <>
+                  {pending.length > 0 && (
+                    <div style={{marginBottom: 20}}>
+                      <h4 style={{fontSize: 13, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--warning)', marginBottom: 8}}>Pending ({pending.length})</h4>
+                      {pending.map(cr => <CrCard key={cr.id} cr={cr} />)}
+                    </div>
+                  )}
+                  {applied.length > 0 && (
+                    <div style={{marginBottom: 20}}>
+                      <h4 style={{fontSize: 13, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--success)', marginBottom: 8}}>Applied ({applied.length})</h4>
+                      {applied.map(cr => <CrCard key={cr.id} cr={cr} />)}
+                    </div>
+                  )}
+                  {rejected.length > 0 && (
+                    <div style={{marginBottom: 20}}>
+                      <h4 style={{fontSize: 13, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--error)', marginBottom: 8}}>Rejected ({rejected.length})</h4>
+                      {rejected.map(cr => <CrCard key={cr.id} cr={cr} />)}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
     // Simplified Project Pricing Component with new features
     const ProjectPricing = ({ projectId, onBack, onRefresh, onNavigate }) => {
       const [project, setProject] = React.useState(null);
@@ -2027,6 +2237,12 @@
       const [editingItem, setEditingItem] = React.useState(null);
       const [phaseForm, setPhaseForm] = React.useState({ name: '', margin_percent: '' });
       const [resourceForm, setResourceForm] = React.useState({ role_id: '', days: '', daily_rate_override: '', notes: '' });
+      const [isCrPanelOpen, setIsCrPanelOpen] = React.useState(false);
+      const [isCrModalOpen, setIsCrModalOpen] = React.useState(false);
+      const [crForm, setCrForm] = React.useState({ field_path: '', old_value: '', new_value: '', reason: '', label: '' });
+      const [changeRequests, setChangeRequests] = React.useState([]);
+
+      const editable = db.isEditable(project);
 
       const loadData = React.useCallback(() => {
         const p = db.getProject(projectId);
@@ -2043,6 +2259,7 @@
         setExpandedPhases(exp);
         setTotals(db.calculateProjectTotals(projectId));
         setRoles(db.getRoles());
+        setChangeRequests(db.getChangeRequests(projectId));
         setTimeout(() => lucide.createIcons(), 0);
       }, [projectId]);
 
@@ -2107,9 +2324,46 @@
           <div style={{display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24}}>
             <button className="btn btn-icon" onClick={onBack}><i data-lucide="arrow-left" style={{width: 20, height: 20}}></i></button>
             <div style={{flex: 1}}>
-              <h1 className="page-title" style={{margin: 0}}>{project.name}</h1>
+              <div style={{display: 'flex', alignItems: 'center', gap: 10}}>
+                <h1 className="page-title" style={{margin: 0}}>{project.name}</h1>
+                <span className={`badge ${project.status === 'approved' ? 'badge-green' : project.status === 'pending_approval' ? 'badge-yellow' : 'badge-purple'}`} style={{fontSize: 12, padding: '4px 10px'}}>
+                  {project.status === 'approved' ? 'Approved' : project.status === 'pending_approval' ? 'Pending Approval' : 'Draft'}
+                </span>
+                {!editable && (
+                  <span style={{fontSize: 12, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 4}}>
+                    <i data-lucide="lock" style={{width: 12, height: 12}}></i> Locked
+                  </span>
+                )}
+              </div>
               <p className="text-secondary" style={{margin: 0}}>{project.client && `${project.client} • `}{project.duration_weeks && `${project.duration_weeks} weeks`}</p>
             </div>
+            {/* Status transition buttons */}
+            {project.status === 'draft' && (
+              <button className="btn btn-primary" onClick={() => { db.submitForApproval(projectId); loadData(); }} style={{background: 'var(--warning)', borderColor: 'var(--warning)'}}>
+                <i data-lucide="send" style={{width: 16, height: 16}}></i> Submit for Approval
+              </button>
+            )}
+            {project.status === 'pending_approval' && (
+              <>
+                <button className="btn btn-primary" onClick={() => { db.approveProject(projectId); loadData(); }} style={{background: 'var(--success)', borderColor: 'var(--success)'}}>
+                  <i data-lucide="check-circle" style={{width: 16, height: 16}}></i> Approve
+                </button>
+                <button className="btn btn-secondary" onClick={() => { db.revertToDraft(projectId); loadData(); }}>
+                  <i data-lucide="undo-2" style={{width: 16, height: 16}}></i> Revert to Draft
+                </button>
+              </>
+            )}
+            {project.status === 'approved' && (
+              <button className="btn btn-secondary" onClick={() => { db.revertToDraft(projectId); loadData(); }}>
+                <i data-lucide="undo-2" style={{width: 16, height: 16}}></i> Revert to Draft
+              </button>
+            )}
+            {changeRequests.filter(cr => cr.status === 'pending').length > 0 && (
+              <button className="btn btn-secondary" onClick={() => setIsCrPanelOpen(true)} style={{position: 'relative'}}>
+                <i data-lucide="git-pull-request" style={{width: 16, height: 16}}></i> CRs
+                <span className="badge badge-red" style={{position: 'absolute', top: -6, right: -6, fontSize: 10, padding: '2px 6px'}}>{changeRequests.filter(cr => cr.status === 'pending').length}</span>
+              </button>
+            )}
             <button className="btn btn-secondary" onClick={() => setIsHistoryOpen(true)}>
               <i data-lucide="history" style={{width: 16, height: 16}}></i> History
             </button>
@@ -2180,14 +2434,26 @@
           </div>
 
           {/* Action Buttons */}
-          <div style={{display: 'flex', gap: 8, marginBottom: 16}}>
-            <button className="btn btn-purple" onClick={() => setIsRiskDiscountOpen(true)}>
-              <i data-lucide="sliders" style={{width: 16, height: 16}}></i> Risk & Discount
-            </button>
-            <button className="btn btn-secondary" onClick={() => { setPhaseForm({ name: '', margin_percent: '' }); setEditingItem(null); setIsPhaseModalOpen(true); }}>
-              <i data-lucide="plus" style={{width: 16, height: 16}}></i> Add Phase
-            </button>
-          </div>
+          {editable ? (
+            <div style={{display: 'flex', gap: 8, marginBottom: 16}}>
+              <button className="btn btn-purple" onClick={() => setIsRiskDiscountOpen(true)}>
+                <i data-lucide="sliders" style={{width: 16, height: 16}}></i> Risk & Discount
+              </button>
+              <button className="btn btn-secondary" onClick={() => { setPhaseForm({ name: '', margin_percent: '' }); setEditingItem(null); setIsPhaseModalOpen(true); }}>
+                <i data-lucide="plus" style={{width: 16, height: 16}}></i> Add Phase
+              </button>
+            </div>
+          ) : (
+            <div style={{display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center'}}>
+              <div style={{padding: '8px 16px', background: 'var(--bg-secondary)', borderRadius: 8, fontSize: 13, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 6}}>
+                <i data-lucide="lock" style={{width: 14, height: 14}}></i>
+                Project is {project.status === 'approved' ? 'approved' : 'pending approval'} — use Change Requests to modify
+              </div>
+              <button className="btn btn-secondary" onClick={() => setIsCrPanelOpen(true)}>
+                <i data-lucide="git-pull-request" style={{width: 16, height: 16}}></i> Change Requests ({changeRequests.length})
+              </button>
+            </div>
+          )}
 
           {/* View Tabs */}
           <div className="tabs" style={{marginBottom: 20}}>
@@ -2200,7 +2466,7 @@
           {/* BOQ Tab */}
           {activeTab === 'boq' && (
             <div className="card" style={{marginBottom: 24}}>
-              <BOQTable projectId={projectId} projectMargin={project.target_margin || 0} />
+              <BOQTable projectId={projectId} projectMargin={project.target_margin || 0} editable={editable} onCreateCr={(fieldPath, oldVal, label) => { setCrForm({ field_path: fieldPath, old_value: String(oldVal), new_value: '', reason: '', label }); setIsCrModalOpen(true); }} />
             </div>
           )}
 
@@ -2222,7 +2488,9 @@
                     <label style={{fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'nowrap'}}>Margin%</label>
                     <input type="number" className="form-input" style={{width: 70, padding: '2px 6px', fontSize: 12, textAlign: 'center'}}
                       value={phase.margin_percent ?? ''} placeholder="—"
+                      disabled={!editable}
                       onChange={e => {
+                        if (!editable) return;
                         const val = e.target.value === '' ? null : parseFloat(e.target.value);
                         db.updatePhase(phase.id, { margin_percent: val });
                         loadData();
@@ -2237,9 +2505,11 @@
                   <div style={{marginBottom: 16}}>
                     <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8}}>
                       <h4>Resources</h4>
-                      <button className="btn btn-sm btn-secondary" onClick={() => { setCurrentPhaseId(phase.id); setResourceForm({ role_id: '', days: '', daily_rate_override: '', notes: '' }); setEditingItem(null); setIsResourceModalOpen(true); }}>
-                        <i data-lucide="plus" style={{width: 14, height: 14}}></i> Add
-                      </button>
+                      {editable && (
+                        <button className="btn btn-sm btn-secondary" onClick={() => { setCurrentPhaseId(phase.id); setResourceForm({ role_id: '', days: '', daily_rate_override: '', notes: '' }); setEditingItem(null); setIsResourceModalOpen(true); }}>
+                          <i data-lucide="plus" style={{width: 14, height: 14}}></i> Add
+                        </button>
+                      )}
                     </div>
                     {phase.resources.length === 0 ? (
                       <p className="text-secondary" style={{fontSize: 13}}>No resources added yet</p>
@@ -2254,7 +2524,9 @@
                               <td>{formatCurrency(r.effective_daily_rate)}/day</td>
                               <td style={{fontWeight: 600}}>{formatCurrency(r.total)}</td>
                               <td>
-                                <button className="btn btn-icon btn-sm" onClick={() => db.deleteResourceCost(r.id) || loadData()} style={{color: 'var(--error)'}}><i data-lucide="trash-2" style={{width: 14, height: 14}}></i></button>
+                                {editable && (
+                                  <button className="btn btn-icon btn-sm" onClick={() => db.deleteResourceCost(r.id) || loadData()} style={{color: 'var(--error)'}}><i data-lucide="trash-2" style={{width: 14, height: 14}}></i></button>
+                                )}
                               </td>
                             </tr>
                           ))}
@@ -2271,6 +2543,8 @@
           {/* Note: modals render outside tab content */}
           {isHistoryOpen && <VersionHistory projectId={projectId} onClose={() => setIsHistoryOpen(false)} />}
           {isRiskDiscountOpen && <RiskDiscountModal project={project} onSave={handleSaveRiskDiscount} onClose={() => setIsRiskDiscountOpen(false)} />}
+          {isCrModalOpen && <ChangeRequestModal form={crForm} onUpdate={setCrForm} onSubmit={() => { db.createChangeRequest(projectId, crForm.field_path, crForm.old_value, crForm.new_value, crForm.reason); setIsCrModalOpen(false); loadData(); }} onClose={() => setIsCrModalOpen(false)} />}
+          {isCrPanelOpen && <ChangeRequestPanel projectId={projectId} changeRequests={changeRequests} onClose={() => setIsCrPanelOpen(false)} onRefresh={() => { loadData(); }} />}
 
           {isPhaseModalOpen && (
             <div className="modal-overlay" onClick={() => setIsPhaseModalOpen(false)}>
@@ -2819,6 +3093,9 @@
                     <div>
                       <div style={{display: 'flex', alignItems: 'center', gap: 8}}>
                         <h3 style={{margin: 0}}>{p.name}</h3>
+                        <span className={`badge ${p.status === 'approved' ? 'badge-green' : p.status === 'pending_approval' ? 'badge-yellow' : 'badge-purple'}`} style={{fontSize: 10}}>
+                          {p.status === 'approved' ? 'Approved' : p.status === 'pending_approval' ? 'Pending' : 'Draft'}
+                        </span>
                         {p.riskMarginPercent > 0 && (
                           <span style={{display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 100, fontSize: 11, fontWeight: 500, background: 'rgba(94, 86, 222, 0.15)', color: 'var(--boud-purple)'}}>
                             <i data-lucide="shield" style={{width: 12, height: 12}}></i>
