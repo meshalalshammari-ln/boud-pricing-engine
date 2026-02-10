@@ -234,7 +234,7 @@
     const generateId = (prefix = '') => prefix + '_' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
 
     // Schema version for data migrations
-    const SCHEMA_VERSION = 4;
+    const SCHEMA_VERSION = 5;
 
     // Permission definitions
     const PERMISSIONS = {
@@ -280,6 +280,7 @@
       packages: [],
       users: [],
       currentUserId: null,
+      paymentSchedules: [],
       templates: [],
       recentRoles: []
     };
@@ -406,6 +407,11 @@
         }
 
         state.schema_version = 4;
+      }
+
+      if (version < 5) {
+        if (!state.paymentSchedules) state.paymentSchedules = [];
+        state.schema_version = 5;
       }
 
       return state;
@@ -1027,6 +1033,42 @@
       deactivateUser: (id) => {
         const idx = (dbState.users || []).findIndex(u => u.id === id);
         if (idx !== -1) { dbState.users[idx].is_active = false; saveState(); }
+      },
+
+      // --- Payment Schedules ---
+      getPaymentSchedule: (projectId) => (dbState.paymentSchedules || []).find(ps => ps.project_id === projectId),
+      createPaymentSchedule: (projectId) => {
+        const existing = (dbState.paymentSchedules || []).find(ps => ps.project_id === projectId);
+        if (existing) return existing.id;
+        const id = generateId('ps');
+        dbState.paymentSchedules.push({ id, project_id: projectId, payments: [], created_at: new Date().toISOString() });
+        saveState();
+        return id;
+      },
+      addPayment: (projectId, payment) => {
+        let schedule = (dbState.paymentSchedules || []).find(ps => ps.project_id === projectId);
+        if (!schedule) {
+          db.createPaymentSchedule(projectId);
+          schedule = (dbState.paymentSchedules || []).find(ps => ps.project_id === projectId);
+        }
+        const paymentId = generateId('pay');
+        schedule.payments.push({ id: paymentId, ...payment, status: payment.status || 'pending' });
+        saveState();
+        return paymentId;
+      },
+      updatePayment: (projectId, paymentId, data) => {
+        const schedule = (dbState.paymentSchedules || []).find(ps => ps.project_id === projectId);
+        if (schedule) {
+          const idx = schedule.payments.findIndex(p => p.id === paymentId);
+          if (idx !== -1) { Object.assign(schedule.payments[idx], data); saveState(); }
+        }
+      },
+      deletePayment: (projectId, paymentId) => {
+        const schedule = (dbState.paymentSchedules || []).find(ps => ps.project_id === projectId);
+        if (schedule) {
+          schedule.payments = schedule.payments.filter(p => p.id !== paymentId);
+          saveState();
+        }
       },
 
       calculateProjectTotals: (projectId) => {
@@ -2508,6 +2550,143 @@
       );
     };
 
+    // Payment Schedule Editor
+    const PaymentScheduleEditor = ({ projectId, project, totals, editable, onRefresh }) => {
+      const [schedule, setSchedule] = React.useState(null);
+      const [isAddOpen, setIsAddOpen] = React.useState(false);
+      const [form, setForm] = React.useState({ date: '', amount: '', description: '', notes: '' });
+
+      const loadData = () => {
+        setSchedule(db.getPaymentSchedule(projectId));
+        setTimeout(() => lucide.createIcons(), 0);
+      };
+      React.useEffect(() => { loadData(); }, [projectId]);
+
+      const payments = schedule?.payments || [];
+      const totalScheduled = payments.reduce((s, p) => s + (p.amount || 0), 0);
+      const totalReceived = payments.filter(p => p.status === 'received').reduce((s, p) => s + (p.amount || 0), 0);
+      const remaining = (totals?.sellingPrice || 0) - totalScheduled;
+
+      const handleAdd = () => {
+        db.addPayment(projectId, {
+          date: form.date,
+          amount: parseFloat(form.amount) || 0,
+          description: form.description,
+          notes: form.notes || '',
+          boq_item_ids: []
+        });
+        setIsAddOpen(false);
+        setForm({ date: '', amount: '', description: '', notes: '' });
+        loadData();
+        onRefresh?.();
+      };
+
+      const toggleStatus = (paymentId, currentStatus) => {
+        const newStatus = currentStatus === 'received' ? 'pending' : 'received';
+        db.updatePayment(projectId, paymentId, { status: newStatus });
+        loadData();
+      };
+
+      const getStatusColor = (status) => {
+        if (status === 'received') return 'var(--success)';
+        const payment = payments.find(p => p.status === status);
+        if (payment && payment.date && new Date(payment.date) < new Date()) return 'var(--error)';
+        return 'var(--warning)';
+      };
+
+      return (
+        <div className="card" style={{marginBottom: 24}}>
+          <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16}}>
+            <div>
+              <h3 style={{margin: 0}}>Payment Schedule</h3>
+              <p className="text-secondary" style={{fontSize: 13, margin: '4px 0 0'}}>
+                {payments.length} payments — {formatCurrency(totalReceived)} received of {formatCurrency(totalScheduled)} scheduled
+              </p>
+            </div>
+            {editable && (
+              <button className="btn btn-primary btn-sm" onClick={() => { setForm({ date: '', amount: remaining > 0 ? remaining.toString() : '', description: '', notes: '' }); setIsAddOpen(true); }}>
+                <i data-lucide="plus" style={{width: 14, height: 14}}></i> Add Payment
+              </button>
+            )}
+          </div>
+
+          {/* Payment progress */}
+          {totalScheduled > 0 && (
+            <div style={{marginBottom: 16}}>
+              <div style={{display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4}}>
+                <span>Collected: {formatCurrency(totalReceived)}</span>
+                <span>{Math.round(totalReceived / totalScheduled * 100)}%</span>
+              </div>
+              <div style={{height: 8, borderRadius: 4, background: 'var(--bg-secondary)', overflow: 'hidden'}}>
+                <div style={{height: '100%', width: `${Math.round(totalReceived / totalScheduled * 100)}%`, background: 'var(--success)', borderRadius: 4, transition: 'width 0.3s'}}></div>
+              </div>
+              {remaining > 0 && <div style={{fontSize: 12, color: 'var(--warning)', marginTop: 4}}>Unscheduled: {formatCurrency(remaining)}</div>}
+              {remaining < 0 && <div style={{fontSize: 12, color: 'var(--error)', marginTop: 4}}>Over-scheduled by {formatCurrency(Math.abs(remaining))}</div>}
+            </div>
+          )}
+
+          {/* Payment timeline */}
+          {payments.length === 0 ? (
+            <div style={{textAlign: 'center', padding: 24, color: 'var(--gray-text)'}}>
+              <i data-lucide="calendar" style={{width: 36, height: 36, marginBottom: 8}}></i>
+              <p>No payments scheduled yet</p>
+            </div>
+          ) : (
+            <table>
+              <thead><tr><th>Date</th><th>Description</th><th style={{textAlign: 'right'}}>Amount</th><th>Status</th><th>Notes</th><th></th></tr></thead>
+              <tbody>
+                {payments.sort((a, b) => new Date(a.date || 0) - new Date(b.date || 0)).map(p => {
+                  const isOverdue = p.status === 'pending' && p.date && new Date(p.date) < new Date();
+                  return (
+                    <tr key={p.id} style={{background: isOverdue ? 'rgba(239,68,68,0.05)' : undefined}}>
+                      <td style={{whiteSpace: 'nowrap'}}>{p.date ? new Date(p.date).toLocaleDateString('en-SA', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</td>
+                      <td style={{fontWeight: 500}}>{p.description || '—'}</td>
+                      <td style={{textAlign: 'right', fontWeight: 600}}>{formatCurrency(p.amount)}</td>
+                      <td>
+                        <button className={`badge ${p.status === 'received' ? 'badge-green' : isOverdue ? 'badge-red' : 'badge-yellow'}`}
+                          style={{cursor: 'pointer', border: 'none', fontSize: 11}} onClick={() => toggleStatus(p.id, p.status)}>
+                          {p.status === 'received' ? 'Received' : isOverdue ? 'Overdue' : 'Pending'}
+                        </button>
+                      </td>
+                      <td className="text-secondary" style={{fontSize: 12}}>{p.notes || '—'}</td>
+                      <td>
+                        {editable && (
+                          <button className="btn btn-icon btn-sm" onClick={() => { db.deletePayment(projectId, p.id); loadData(); }} style={{color: 'var(--error)'}}>
+                            <i data-lucide="trash-2" style={{width: 14, height: 14}}></i>
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                <tr style={{fontWeight: 600}}>
+                  <td colSpan={2}>Total</td>
+                  <td style={{textAlign: 'right'}}>{formatCurrency(totalScheduled)}</td>
+                  <td colSpan={3}></td>
+                </tr>
+              </tbody>
+            </table>
+          )}
+
+          {/* Add Payment Modal */}
+          {isAddOpen && (
+            <div className="modal-overlay" onClick={() => setIsAddOpen(false)}>
+              <div className="modal" style={{maxWidth: 450}} onClick={e => e.stopPropagation()}>
+                <div className="modal-header"><h3>Add Payment</h3><button className="btn btn-icon" onClick={() => setIsAddOpen(false)}><i data-lucide="x" style={{width: 20, height: 20}}></i></button></div>
+                <div className="modal-body">
+                  <div className="form-group"><label className="form-label">Due Date</label><input type="date" className="form-input" value={form.date} onChange={e => setForm({...form, date: e.target.value})} /></div>
+                  <div className="form-group"><label className="form-label">Amount (SAR) *</label><input type="number" className="form-input" value={form.amount} onChange={e => setForm({...form, amount: e.target.value})} /></div>
+                  <div className="form-group"><label className="form-label">Description *</label><input type="text" className="form-input" value={form.description} onChange={e => setForm({...form, description: e.target.value})} placeholder="e.g., Phase 1 milestone, Final payment" /></div>
+                  <div className="form-group"><label className="form-label">Notes</label><textarea className="form-input" rows={2} value={form.notes} onChange={e => setForm({...form, notes: e.target.value})} placeholder="Follow-up notes..." style={{resize: 'vertical'}}></textarea></div>
+                </div>
+                <div className="modal-footer"><button className="btn btn-secondary" onClick={() => setIsAddOpen(false)}>Cancel</button><button className="btn btn-primary" disabled={!form.amount || !form.description} onClick={handleAdd}>Add Payment</button></div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
     // Simplified Project Pricing Component with new features
     const ProjectPricing = ({ projectId, onBack, onRefresh, onNavigate }) => {
       const [project, setProject] = React.useState(null);
@@ -2778,6 +2957,9 @@
             <button className={`tab ${activeTab === 'boq' ? 'active' : ''}`} onClick={() => setActiveTab('boq')}>
               BOQ {totals.boqItemCount > 0 && <span className="badge badge-purple" style={{marginLeft: 6, fontSize: 11}}>{totals.boqItemCount}</span>}
             </button>
+            <button className={`tab ${activeTab === 'billing' ? 'active' : ''}`} onClick={() => setActiveTab('billing')}>
+              Billing {(() => { const s = db.getPaymentSchedule(projectId); return s && s.payments.length > 0 ? <span className="badge badge-green" style={{marginLeft: 6, fontSize: 11}}>{s.payments.length}</span> : null; })()}
+            </button>
           </div>
 
           {/* BOQ Tab */}
@@ -2785,6 +2967,11 @@
             <div className="card" style={{marginBottom: 24}}>
               <BOQTable projectId={projectId} projectMargin={project.target_margin || 0} editable={editable} onCreateCr={(fieldPath, oldVal, label) => { setCrForm({ field_path: fieldPath, old_value: String(oldVal), new_value: '', reason: '', label }); setIsCrModalOpen(true); }} />
             </div>
+          )}
+
+          {/* Billing Tab */}
+          {activeTab === 'billing' && (
+            <PaymentScheduleEditor projectId={projectId} project={project} totals={totals} editable={editable} onRefresh={loadData} />
           )}
 
           {/* Resources Tab - Phases */}
